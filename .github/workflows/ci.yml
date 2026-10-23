@@ -18,6 +18,10 @@ jobs:
             runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
+      - name: test installer
+        run: |
+          bash -n install.sh
+          python3 -B -m unittest discover -s tests -p 'test_install.py'
       - name: install toolchain
         uses: ./.github/actions/toolchain
         with:

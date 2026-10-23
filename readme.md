@@ -14,66 +14,63 @@ A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and 
 
 Use a prebuilt binary on 64-bit Ubuntu. The commands below select AMD64 or ARM64 automatically and install `realm` to `/usr/local/bin`.
 
-### Download the latest build
+### One-line install
 
-Binaries are available from [Actions → build](https://github.com/phungvanquy/realm/actions/workflows/build.yml). GitHub requires you to [sign in to download build artifacts](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts). Install the GitHub CLI and sign in once:
+```bash
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash
+```
+
+The [installer](install.sh) detects your CPU, downloads the latest public release, verifies its SHA-256 checksum, and installs the full binary. No GitHub account, token, or GitHub CLI is needed. It uses `sudo` if required to write to `/usr/local/bin`.
+
+If `curl` is missing, install it first:
 
 ```bash
 sudo apt update
-sudo apt install -y gh ca-certificates
-gh auth login --hostname github.com
+sudo apt install -y curl ca-certificates
 ```
 
-If `gh` is unavailable in your configured Ubuntu repositories, use the [GitHub CLI installation instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md).
-
-Copy this whole block into Bash. It downloads the full binary from the latest successful build of a push to `master`:
+Check the installation:
 
 ```bash
-(
-  set -eu
-  case "$(uname -m)" in
-    x86_64) realm_target=x86_64-unknown-linux-gnu ;;
-    aarch64|arm64) realm_target=aarch64-unknown-linux-gnu ;;
-    *) echo "Supported architectures: AMD64 and ARM64" >&2; exit 1 ;;
-  esac
-
-  realm_run_id="$(gh api \
-    'repos/phungvanquy/realm/actions/workflows/build.yml/runs?branch=master&event=push&status=success&per_page=1' \
-    --jq '.workflow_runs[0].id // empty')"
-  if [ -z "$realm_run_id" ]; then
-    echo "No successful build found. Use Docker or build from source." >&2
-    exit 1
-  fi
-
-  realm_tmp="$(mktemp -d)"
-  trap 'rm -rf "$realm_tmp"' EXIT
-  gh run download "$realm_run_id" --repo phungvanquy/realm \
-    --name "realm-$realm_target" --dir "$realm_tmp"
-  sudo install -m 0755 "$realm_tmp/realm" /usr/local/bin/realm
-  /usr/local/bin/realm --version
-)
+realm --version
 ```
 
-Build artifacts expire. If a download is unavailable, use the [container image](readme.container.md) or [build from source](#build-from-source). Tagged versions, when published, are also listed under [Releases](https://github.com/phungvanquy/realm/releases).
+You can choose a version, install the smaller TCP/UDP build, or install for your own user without sudo:
+
+```bash
+# A specific release (with or without the v prefix)
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --version v2.9.6
+
+# Slim build, installed as realm
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --slim
+
+# Install for the current user
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Options can be combined. For a user installation, add the `export PATH` line to `~/.bashrc` to keep it in future terminals. The systemd example below uses the default `/usr/local/bin/realm` path.
 
 <details>
 <summary>Download in your browser instead</summary>
 
-Sign in to GitHub, open the latest successful `master` push in [Actions → build](https://github.com/phungvanquy/realm/actions/workflows/build.yml), and download the matching artifact from its **Artifacts** section:
+Open the [latest release](https://github.com/phungvanquy/realm/releases/latest) and download the matching archive and its `.sha256` file. These downloads are public:
 
-| CPU | `uname -m` | Full binary artifact |
+| CPU | `uname -m` | Full binary archive |
 | --- | --- | --- |
-| AMD64 / x86-64 | `x86_64` | `realm-x86_64-unknown-linux-gnu` |
-| ARM64 | `aarch64` | `realm-aarch64-unknown-linux-gnu` |
+| AMD64 / x86-64 | `x86_64` | `realm-x86_64-unknown-linux-gnu.tar.gz` |
+| ARM64 | `aarch64` | `realm-aarch64-unknown-linux-gnu.tar.gz` |
 
-Extract the downloaded ZIP and open a terminal in the extracted directory, then run:
+In the download directory, verify and extract the archive. For AMD64:
 
 ```bash
+sha256sum --check realm-x86_64-unknown-linux-gnu.tar.gz.sha256 &&
+tar -xzf realm-x86_64-unknown-linux-gnu.tar.gz &&
 sudo install -m 0755 realm /usr/local/bin/realm
 realm --version
 ```
 
-The `realm-slim-*` artifacts contain a smaller `realm-slim` binary for basic TCP/UDP forwarding. To install one as `realm`, use `sudo install -m 0755 realm-slim /usr/local/bin/realm` instead.
+For ARM64, replace `x86_64` with `aarch64`. The `realm-slim-*` archives contain a smaller `realm-slim` binary for basic TCP/UDP forwarding; install that file as `realm` with `sudo install -m 0755 realm-slim /usr/local/bin/realm`.
 
 </details>
 
@@ -170,7 +167,11 @@ After editing `/etc/realm/config.toml`, apply the changes with `sudo systemctl r
 
 ### Update or remove
 
-To update a systemd installation, stop the service with `sudo systemctl stop realm`, repeat the [download and install block](#download-the-latest-build), then run `sudo systemctl start realm`. Your configuration stays in `/etc/realm/config.toml`.
+To update, repeat the [one-line install](#one-line-install), including any options such as `--slim` or `--install-dir` used for your installation. The installer verifies the new binary before replacing the old one. Your configuration stays in `/etc/realm/config.toml`. Restart a running systemd service to use the new binary:
+
+```bash
+sudo systemctl restart realm
+```
 
 To remove a systemd installation:
 
@@ -187,8 +188,9 @@ This keeps `/etc/realm/config.toml` for reuse. For a standalone binary installat
 | Symptom | What to check |
 | --- | --- |
 | `realm: command not found` | Run `/usr/local/bin/realm --version` and ensure `/usr/local/bin` is in your `PATH`. |
-| `Exec format error` | Download the artifact matching `uname -m`; 32-bit ARM builds are not provided by this fork. |
-| Artifact download fails | Check `gh auth status`; use a successful build with unexpired artifacts, Docker, or a source build. |
+| `Exec format error` | Use the installer to select the binary matching `uname -m`; 32-bit ARM builds are not provided by this fork. |
+| Release download fails | Check access to GitHub and confirm the requested version exists in [Releases](https://github.com/phungvanquy/realm/releases). |
+| Checksum verification fails | Retry the download. The installer leaves the existing binary intact on a verification failure. |
 | `Address already in use` | Stop the foreground relay before starting systemd, or choose a free listening port. |
 | Service does not start | Run `sudo journalctl -u realm -n 50 --no-pager`; check the binary path and configuration. |
 | Remote clients cannot connect | Check the listening address, TCP/UDP selection, firewall rules, and reachability of the destination from the relay host. |
