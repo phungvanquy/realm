@@ -1,0 +1,42 @@
+name: ci
+on:
+  push:
+    paths-ignore: ["**.md"]
+    branches: [master]
+  pull_request:
+    paths-ignore: ["**.md"]
+    branches: [master]
+jobs:
+  clippy:
+    runs-on: >-
+      ${{  
+        contains(matrix.target, 'apple') && 'macos-latest' ||
+        contains(matrix.target, 'msvc') && 'windows-latest' ||
+        'ubuntu-22.04'
+      }}
+    strategy:
+      matrix:
+        target:
+          # cross
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-gnu
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+      - name: install toolchain
+        uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          components: clippy
+          write-build-cache: false
+
+      - name: clippy
+        run: cargo clippy
+      - name: test core
+        run: cargo test -p realm_core --no-fail-fast --features proxy
+      - name: test binary
+        run: cargo test --no-fail-fast
