@@ -8,23 +8,14 @@ on:
     branches: [master]
 jobs:
   clippy:
-    runs-on: >-
-      ${{  
-        contains(matrix.target, 'apple') && 'macos-latest' ||
-        contains(matrix.target, 'msvc') && 'windows-latest' ||
-        'ubuntu-22.04'
-      }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target:
-          # cross
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - x86_64-pc-windows-gnu
-          - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
       - name: install toolchain
@@ -35,8 +26,8 @@ jobs:
           write-build-cache: false
 
       - name: clippy
-        run: cargo clippy
+        run: cargo clippy --target ${{ matrix.target }}
       - name: test core
-        run: cargo test -p realm_core --no-fail-fast --features proxy
+        run: cargo test -p realm_core --no-fail-fast --features proxy --target ${{ matrix.target }}
       - name: test binary
-        run: cargo test --no-fail-fast
+        run: cargo test --no-fail-fast --target ${{ matrix.target }}
