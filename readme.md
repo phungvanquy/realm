@@ -12,7 +12,7 @@ A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and 
 
 ## Install on Ubuntu
 
-Use a prebuilt binary on 64-bit Ubuntu. The commands below select AMD64 or ARM64 automatically and install `realm` to `/usr/local/bin`.
+Use a prebuilt binary on 64-bit Ubuntu 22.04 or newer. The commands below select AMD64 or ARM64 automatically and install `realm` to `/usr/local/bin`.
 
 ### One-line install
 
@@ -39,7 +39,7 @@ You can choose a version, install the smaller TCP/UDP build, or install for your
 
 ```bash
 # A specific release (with or without the v prefix)
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --version v2.9.6
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --version v2.9.7
 
 # Slim build, installed as realm
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --slim

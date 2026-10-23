@@ -10,21 +10,27 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
       - run: mkdir -p out/${{ matrix.target }}
-      - name: build cross
+      - name: build Ubuntu binaries
         uses: ./.github/actions/build/cross
         with:
-          mode: cross
+          mode: native
           target: ${{ matrix.target }}
           outdir: out/${{ matrix.target }}
+      - name: test binaries on Ubuntu 22.04
+        run: |
+          docker run --rm -v "$PWD/out/${{ matrix.target }}:/realm:ro" ubuntu:22.04 \
+            sh -ec '/realm/realm --version; /realm/realm-slim --version'
       - name: upload binary
         uses: actions/upload-artifact@v6
         with:

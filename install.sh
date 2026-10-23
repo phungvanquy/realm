@@ -6,14 +6,14 @@ usage() {
 Install Realm from the public phungvanquy/realm releases.
 
 Usage: bash install.sh [options]
-  --version VERSION    Install a tag such as v2.9.6 (default: latest release)
+  --version VERSION    Install a tag such as v2.9.7 (default: latest release)
   --slim               Install the smaller TCP/UDP build
   --install-dir DIR    Installation directory (default: /usr/local/bin)
   -h, --help           Show this help
 
 Examples:
   bash install.sh
-  bash install.sh --version v2.9.6 --slim
+  bash install.sh --version v2.9.7 --slim
   bash install.sh --install-dir "$HOME/.local/bin"
 EOF
 }
@@ -63,7 +63,7 @@ done
 if [[ "$realm_version" != latest ]]; then
   realm_version="v${realm_version#v}"
   [[ "$realm_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] ||
-    die "Use a version such as v2.9.6, or latest."
+    die "Use a version such as v2.9.7, or latest."
 fi
 
 [[ "$(uname -s)" == Linux ]] || die "This installer supports Linux only."

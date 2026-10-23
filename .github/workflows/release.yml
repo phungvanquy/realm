@@ -9,12 +9,14 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
       - name: test installer
@@ -22,12 +24,16 @@ jobs:
           bash -n install.sh
           python3 -B -m unittest discover -s tests -p 'test_install.py'
       - run: mkdir -p out/${{ matrix.target }}
-      - name: build cross
+      - name: build Ubuntu binaries
         uses: ./.github/actions/build/cross
         with:
-          mode: cross
+          mode: native
           target: ${{ matrix.target }}
           outdir: out/${{ matrix.target }}
+      - name: test binaries on Ubuntu 22.04
+        run: |
+          docker run --rm -v "$PWD/out/${{ matrix.target }}:/realm:ro" ubuntu:22.04 \
+            sh -ec '/realm/realm --version; /realm/realm-slim --version'
       - name: package binaries and checksums
         working-directory: out/${{ matrix.target }}
         run: |
@@ -65,7 +71,7 @@ jobs:
             out/*.tar.gz
             out/*.sha256
           body: |
-            Prebuilt Linux binaries for Ubuntu AMD64 and ARM64, with full and slim builds and SHA-256 checksums.
+            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
 
             Install this version without a GitHub account or token:
 
