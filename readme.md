@@ -81,7 +81,7 @@ With [Docker installed](https://docs.docker.com/engine/install/ubuntu/), replace
 ```bash
 sudo docker run -d --name realm --restart unless-stopped \
   -p 5000:5000/tcp \
-  ghcr.io/phungvanquy/realm2:master \
+  ghcr.io/phungvanquy/realm:master \
   -l 0.0.0.0:5000 -r 192.168.1.100:443
 ```
 
