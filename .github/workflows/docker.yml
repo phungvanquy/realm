@@ -12,6 +12,9 @@ on:
 jobs:
   docker:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6
       # build amd64/arm64 binaries
@@ -48,6 +51,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           push: true
 
       # build and push (slim)
@@ -62,6 +66,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_slim.outputs.tags }}
+          labels: ${{ steps.meta_slim.outputs.labels }}
           build-args: |
             BINARY_NAME=realm-slim
           push: true
