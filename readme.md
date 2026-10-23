@@ -1,61 +1,231 @@
 # Realm
 
-A simple, high performance relay server written in rust.
+A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and ARM64 and is based on [zhboner/realm](https://github.com/zhboner/realm).
 
-<p><img src="https://raw.githubusercontent.com/zhboner/realm/master/assets/realm.png"/></p>
+![Realm](assets/realm.png)
 
-[![realm](https://github.com/zhboner/realm/workflows/ci/badge.svg)](https://github.com/zhboner/realm/actions)
-[![realm](https://github.com/zhboner/realm/workflows/build/badge.svg)](https://github.com/zhboner/realm/actions/workflows/cross_compile.yml)
-[![downloads](https://img.shields.io/github/downloads/zhboner/realm/total?color=green)](https://github.com/zhboner/realm/releases)
-<!-- [中文说明](https://zhb.me/realm) -->
+[![ci](https://github.com/phungvanquy/realm/actions/workflows/ci.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/ci.yml)
+[![build](https://github.com/phungvanquy/realm/actions/workflows/build.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/build.yml)
+[![docker](https://github.com/phungvanquy/realm/actions/workflows/docker.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/docker.yml)
 
-## Libs
+[Install on Ubuntu](#install-on-ubuntu) · [First relay](#run-your-first-relay) · [Run at boot](#run-at-boot-with-systemd) · [Docker / Compose](readme.container.md) · [Build from source](#build-from-source) · [Configuration](#configuration)
 
-| lib | doc |
-| ----- | ----- |
-| realm-core | [![crates.io](https://img.shields.io/crates/v/realm_core.svg)](https://crates.io/crates/realm_core) [![Released API docs](https://docs.rs/realm_core/badge.svg)](https://docs.rs/realm_core) |
-| realm-io | [![crates.io](https://img.shields.io/crates/v/realm_io.svg)](https://crates.io/crates/realm_io) [![Released API docs](https://docs.rs/realm_io/badge.svg)](https://docs.rs/realm_io) |
-| realm-lb | [![crates.io](https://img.shields.io/crates/v/realm_lb.svg)](https://crates.io/crates/realm_lb) [![Released API docs](https://docs.rs/realm_lb/badge.svg)](https://docs.rs/realm_lb) |
-| realm-hook | [![crates.io](https://img.shields.io/crates/v/realm_hook.svg)](https://crates.io/crates/realm_hook) [![Released API docs](https://docs.rs/realm_hook/badge.svg)](https://docs.rs/realm_hook)|
-| realm-syscall | [![crates.io](https://img.shields.io/crates/v/realm_syscall.svg)](https://crates.io/crates/realm_syscall) [![Released API docs](https://docs.rs/realm_syscall/badge.svg)](https://docs.rs/realm_syscall) |
+## Install on Ubuntu
 
-## Features
+Use a prebuilt binary on 64-bit Ubuntu. The commands below select AMD64 or ARM64 automatically and install `realm` to `/usr/local/bin`.
 
-- Zero configuration. Setup and run in one command.
-- Concurrency. Bidirectional concurrent traffic leads to high performance.
-- Low resources cost.
+### Download the latest build
 
-## Container
+Binaries are available from [Actions → build](https://github.com/phungvanquy/realm/actions/workflows/build.yml). GitHub requires you to [sign in to download build artifacts](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts). Install the GitHub CLI and sign in once:
 
-Realm can be run in a container with OCI (like Docker, Podman, Kubernetes, etc), see guides [here](readme.container.md).
+```bash
+sudo apt update
+sudo apt install -y gh ca-certificates
+gh auth login --hostname github.com
+```
 
-## Build
+If `gh` is unavailable in your configured Ubuntu repositories, use the [GitHub CLI installation instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md).
 
-Install rust toolchain with [rustup](https://rustup.rs/):
+Copy this whole block into Bash. It downloads the full binary from the latest successful build of a push to `master`:
 
-```shell
+```bash
+(
+  set -eu
+  case "$(uname -m)" in
+    x86_64) realm_target=x86_64-unknown-linux-gnu ;;
+    aarch64|arm64) realm_target=aarch64-unknown-linux-gnu ;;
+    *) echo "Supported architectures: AMD64 and ARM64" >&2; exit 1 ;;
+  esac
+
+  realm_run_id="$(gh api \
+    'repos/phungvanquy/realm/actions/workflows/build.yml/runs?branch=master&event=push&status=success&per_page=1' \
+    --jq '.workflow_runs[0].id // empty')"
+  if [ -z "$realm_run_id" ]; then
+    echo "No successful build found. Use Docker or build from source." >&2
+    exit 1
+  fi
+
+  realm_tmp="$(mktemp -d)"
+  trap 'rm -rf "$realm_tmp"' EXIT
+  gh run download "$realm_run_id" --repo phungvanquy/realm \
+    --name "realm-$realm_target" --dir "$realm_tmp"
+  sudo install -m 0755 "$realm_tmp/realm" /usr/local/bin/realm
+  /usr/local/bin/realm --version
+)
+```
+
+Build artifacts expire. If a download is unavailable, use the [container image](readme.container.md) or [build from source](#build-from-source). Tagged versions, when published, are also listed under [Releases](https://github.com/phungvanquy/realm/releases).
+
+<details>
+<summary>Download in your browser instead</summary>
+
+Sign in to GitHub, open the latest successful `master` push in [Actions → build](https://github.com/phungvanquy/realm/actions/workflows/build.yml), and download the matching artifact from its **Artifacts** section:
+
+| CPU | `uname -m` | Full binary artifact |
+| --- | --- | --- |
+| AMD64 / x86-64 | `x86_64` | `realm-x86_64-unknown-linux-gnu` |
+| ARM64 | `aarch64` | `realm-aarch64-unknown-linux-gnu` |
+
+Extract the downloaded ZIP and open a terminal in the extracted directory, then run:
+
+```bash
+sudo install -m 0755 realm /usr/local/bin/realm
+realm --version
+```
+
+The `realm-slim-*` artifacts contain a smaller `realm-slim` binary for basic TCP/UDP forwarding. To install one as `realm`, use `sudo install -m 0755 realm-slim /usr/local/bin/realm` instead.
+
+</details>
+
+### Prefer Docker?
+
+With [Docker installed](https://docs.docker.com/engine/install/ubuntu/), replace `192.168.1.100:443` with your destination and run:
+
+```bash
+sudo docker run -d --name realm --restart unless-stopped \
+  -p 5000:5000/tcp \
+  ghcr.io/phungvanquy/realm2:master \
+  -l 0.0.0.0:5000 -r 192.168.1.100:443
+```
+
+Docker selects AMD64 or ARM64 automatically. See the [container guide](readme.container.md) for logs, UDP, configuration files, Compose, and updates.
+
+## Run your first relay
+
+Replace `192.168.1.100:443` with the address and port of the service you want to reach:
+
+```bash
+realm -l 0.0.0.0:5000 -r 192.168.1.100:443
+```
+
+Connections to port `5000` on this machine are forwarded to that destination. This command runs in the foreground; press **Ctrl+C** to stop it. Use `127.0.0.1:5000` to accept connections only from this machine. For remote clients, allow the listening port in your host and cloud firewall rules.
+
+TCP is enabled by default. Add `-u` to forward UDP as well, or `-u -t` for UDP only.
+
+For a persistent configuration, create `/etc/realm/config.toml`:
+
+```bash
+sudo install -d -m 0755 /etc/realm
+sudo tee /etc/realm/config.toml >/dev/null <<'EOF'
+[log]
+level = "info"
+output = "stdout"
+
+[network]
+use_udp = false
+
+[[endpoints]]
+listen = "0.0.0.0:5000"
+remote = "192.168.1.100:443"
+EOF
+```
+
+Edit the destination before starting. Set `use_udp = true` if you also need UDP:
+
+```bash
+sudo nano /etc/realm/config.toml
+realm -c /etc/realm/config.toml
+```
+
+Check that the relay starts, then press **Ctrl+C** before setting up the service below so port `5000` is free.
+
+## Run at boot with systemd
+
+After installing the binary and creating the configuration above, create a service:
+
+```bash
+sudo tee /etc/systemd/system/realm.service >/dev/null <<'EOF'
+[Unit]
+Description=Realm TCP and UDP relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/local/bin/realm -c /etc/realm/config.toml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now realm
+sudo systemctl status realm --no-pager
+```
+
+The service runs as a temporary unprivileged user and can also listen on ports below `1024`. Logs go to the journal:
+
+```bash
+sudo journalctl -u realm -n 50 --no-pager
+sudo journalctl -u realm -f
+```
+
+After editing `/etc/realm/config.toml`, apply the changes with `sudo systemctl restart realm`.
+
+### Update or remove
+
+To update a systemd installation, stop the service with `sudo systemctl stop realm`, repeat the [download and install block](#download-the-latest-build), then run `sudo systemctl start realm`. Your configuration stays in `/etc/realm/config.toml`.
+
+To remove a systemd installation:
+
+```bash
+sudo systemctl disable --now realm
+sudo rm -f /etc/systemd/system/realm.service /usr/local/bin/realm
+sudo systemctl daemon-reload
+```
+
+This keeps `/etc/realm/config.toml` for reuse. For a standalone binary installation, just remove `/usr/local/bin/realm` after stopping the process.
+
+### Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `realm: command not found` | Run `/usr/local/bin/realm --version` and ensure `/usr/local/bin` is in your `PATH`. |
+| `Exec format error` | Download the artifact matching `uname -m`; 32-bit ARM builds are not provided by this fork. |
+| Artifact download fails | Check `gh auth status`; use a successful build with unexpired artifacts, Docker, or a source build. |
+| `Address already in use` | Stop the foreground relay before starting systemd, or choose a free listening port. |
+| Service does not start | Run `sudo journalctl -u realm -n 50 --no-pager`; check the binary path and configuration. |
+| Remote clients cannot connect | Check the listening address, TCP/UDP selection, firewall rules, and reachability of the destination from the relay host. |
+
+## Build from source
+
+Install build tools on Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential ca-certificates cmake curl git perl pkg-config
+```
+
+Install Rust using [rustup](https://rustup.rs/) if it is not already installed:
+
+```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
 
-Clone this repository:
+Clone, build, and install. The repository's `rust-toolchain.toml` selects Rust nightly automatically:
 
-```shell
-git clone https://github.com/zhboner/realm && cd realm
+```bash
+git clone https://github.com/phungvanquy/realm.git &&
+cd realm &&
+cargo build --locked --release &&
+sudo install -m 0755 target/release/realm /usr/local/bin/realm &&
+realm --version
 ```
 
-Build:
+The built binary is also available in `target/release/realm`. Continue with [your first relay](#run-your-first-relay) or [systemd setup](#run-at-boot-with-systemd).
 
-```shell
-cargo build --release
+For a build optimized for the current machine's CPU:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --locked --release
 ```
-
-You can also pass `target_cpu=native` to allow more possible optimizations:
-
-```shell
-RUSTFLAGS='-C target_cpu=native' cargo build --release
-```
-
-The `realm` binary will be available in `target/release`.
 
 ### Build Options
 
@@ -78,7 +248,7 @@ The `realm` binary will be available in `target/release`.
 
 Default: proxy + balance + transport + transport-tls-awslc + batched-udp + brutal-shutdown + multi-thread.
 
-Deafult-Slim: batched-udp + brutal-shutdown + multi-thread.
+Default-Slim: batched-udp + brutal-shutdown + multi-thread.
 
 See also: [Cargo.toml](Cargo.toml).
 
@@ -619,3 +789,13 @@ Require `proxy` feature.
 Wait for a PROXY header within a period of time, otherwise close the connection.
 
 default: 5.
+
+## Libraries
+
+| Library | Documentation |
+| --- | --- |
+| realm-core | [crates.io](https://crates.io/crates/realm_core) · [API docs](https://docs.rs/realm_core) |
+| realm-io | [crates.io](https://crates.io/crates/realm_io) · [API docs](https://docs.rs/realm_io) |
+| realm-lb | [crates.io](https://crates.io/crates/realm_lb) · [API docs](https://docs.rs/realm_lb) |
+| realm-hook | [crates.io](https://crates.io/crates/realm_hook) · [API docs](https://docs.rs/realm_hook) |
+| realm-syscall | [crates.io](https://crates.io/crates/realm_syscall) · [API docs](https://docs.rs/realm_syscall) |
