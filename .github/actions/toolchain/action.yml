@@ -73,7 +73,7 @@ runs:
         cache-all-crates: "false"
         cache-workspace-crates: "true"
         cache-bin: "false"
-        save-if: ${{ github.ref == 'refs/heads/master' }} # wtf?? adding input.write-build-cache doesn't work
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: install cross-rs
       if: ${{ inputs.cross == 'true' }}

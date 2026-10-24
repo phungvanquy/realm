@@ -7,7 +7,7 @@ on:
         default: "test"
   push:
     paths-ignore: ["**.md"]
-    branches: [master]
+    branches: [main]
 
 jobs:
   docker:
@@ -45,6 +45,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=master,enable=${{ github.ref == 'refs/heads/main' }}
       - name: build and push images
         uses: docker/build-push-action@v6
         with:
@@ -60,6 +63,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}-slim
+          tags: |
+            type=ref,event=branch
+            type=raw,value=master,enable=${{ github.ref == 'refs/heads/main' }}
       - name: build and push images
         uses: docker/build-push-action@v6
         with:

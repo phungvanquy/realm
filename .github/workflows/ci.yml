@@ -2,10 +2,10 @@ name: ci
 on:
   push:
     paths-ignore: ["**.md"]
-    branches: [master]
+    branches: [main]
   pull_request:
     paths-ignore: ["**.md"]
-    branches: [master]
+    branches: [main]
 jobs:
   clippy:
     runs-on: ${{ matrix.runner }}

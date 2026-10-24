@@ -17,7 +17,7 @@ Use a prebuilt binary on 64-bit Ubuntu 22.04 or newer. The commands below select
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash
 ```
 
 The [installer](install.sh) detects your CPU, downloads the latest public release, verifies its SHA-256 checksum, and installs the full binary. No GitHub account, token, or GitHub CLI is needed. It uses `sudo` if required to write to `/usr/local/bin`.
@@ -39,13 +39,13 @@ You can choose a version, install the smaller TCP/UDP build, or install for your
 
 ```bash
 # A specific release (with or without the v prefix)
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --version v2.9.7
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --version v2.9.7
 
 # Slim build, installed as realm
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --slim
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --slim
 
 # Install for the current user
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/master/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -81,7 +81,7 @@ With [Docker installed](https://docs.docker.com/engine/install/ubuntu/), replace
 ```bash
 sudo docker run -d --name realm --restart unless-stopped \
   -p 5000:5000/tcp \
-  ghcr.io/phungvanquy/realm:master \
+  ghcr.io/phungvanquy/realm:main \
   -l 0.0.0.0:5000 -r 192.168.1.100:443
 ```
 
