@@ -19,10 +19,11 @@ jobs:
             runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
-      - name: test installer
+      - name: test shell utilities
         run: |
           bash -n install.sh
-          python3 -B -m unittest discover -s tests -p 'test_install.py'
+          bash -n realmctl
+          python3 -B -m unittest discover -s tests -p 'test_*.py'
       - run: mkdir -p out/${{ matrix.target }}
       - name: build Ubuntu binaries
         uses: ./.github/actions/build/cross
@@ -34,11 +35,16 @@ jobs:
         run: |
           docker run --rm -v "$PWD/out/${{ matrix.target }}:/realm:ro" ubuntu:22.04 \
             sh -ec '/realm/realm --version; /realm/realm-slim --version'
+      - name: test realmctl with full and slim relays
+        run: |
+          REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
+          REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm-slim" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
       - name: package binaries and checksums
         working-directory: out/${{ matrix.target }}
         run: |
-          tar -zcf realm-${{ matrix.target }}.tar.gz realm
-          tar -zcf realm-slim-${{ matrix.target }}.tar.gz realm-slim
+          install -m 0755 "$GITHUB_WORKSPACE/realmctl" realmctl
+          tar -zcf realm-${{ matrix.target }}.tar.gz realm realmctl
+          tar -zcf realm-slim-${{ matrix.target }}.tar.gz realm-slim realmctl
           sha256sum realm-${{ matrix.target }}.tar.gz > realm-${{ matrix.target }}.tar.gz.sha256
           sha256sum realm-slim-${{ matrix.target }}.tar.gz > realm-slim-${{ matrix.target }}.tar.gz.sha256
       - uses: actions/upload-artifact@v6
@@ -71,7 +77,7 @@ jobs:
             out/*.tar.gz
             out/*.sha256
           body: |
-            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
+            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds, the Bash realmctl rule manager, and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
 
             Install this version without a GitHub account or token:
 
@@ -82,3 +88,5 @@ jobs:
             Add `--slim` for the smaller TCP/UDP build, or `--install-dir "$HOME/.local/bin"` to install without sudo.
 
             See the [installation and systemd guide](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.md#install-on-ubuntu) for configuration and service setup.
+
+            Use [realmctl](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.realmctl.md) to add, edit, enable, and disable named rules.

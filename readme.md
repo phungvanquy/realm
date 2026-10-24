@@ -8,7 +8,7 @@ A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and 
 [![build](https://github.com/phungvanquy/realm/actions/workflows/build.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/build.yml)
 [![docker](https://github.com/phungvanquy/realm/actions/workflows/docker.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/docker.yml)
 
-[Install on Ubuntu](#install-on-ubuntu) · [First relay](#run-your-first-relay) · [Run at boot](#run-at-boot-with-systemd) · [Docker / Compose](readme.container.md) · [Build from source](#build-from-source) · [Configuration](#configuration)
+[Install on Ubuntu](#install-on-ubuntu) · [First relay](#run-your-first-relay) · [Manage rules with realmctl](readme.realmctl.md) · [Run at boot](#run-at-boot-with-systemd) · [Docker / Compose](readme.container.md) · [Build from source](#build-from-source) · [Configuration](#configuration)
 
 ## Install on Ubuntu
 
@@ -20,7 +20,7 @@ Use a prebuilt binary on 64-bit Ubuntu 22.04 or newer. The commands below select
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash
 ```
 
-The [installer](install.sh) detects your CPU, downloads the latest public release, verifies its SHA-256 checksum, and installs the full binary. No GitHub account, token, or GitHub CLI is needed. It uses `sudo` if required to write to `/usr/local/bin`.
+The [installer](install.sh) detects your CPU, downloads the latest public release, verifies its SHA-256 checksum, and installs the full binary and bundled `realmctl` script. Older releases without `realmctl` still install successfully. No GitHub account, token, or GitHub CLI is needed. It uses `sudo` if required to write to `/usr/local/bin`.
 
 If `curl` is missing, install it first:
 
@@ -128,6 +128,8 @@ Check that the relay starts, then press **Ctrl+C** before setting up the service
 
 ## Run at boot with systemd
 
+For multiple named rules, the [realmctl guide](readme.realmctl.md) covers adding, editing, enabling, and disabling rules, with service setup and migration from an existing configuration. The setup below uses a single configuration file.
+
 After installing the binary and creating the configuration above, create a service:
 
 ```bash
@@ -177,11 +179,12 @@ To remove a systemd installation:
 
 ```bash
 sudo systemctl disable --now realm
-sudo rm -f /etc/systemd/system/realm.service /usr/local/bin/realm
+sudo rm -f /etc/systemd/system/realm.service /usr/local/bin/realm /usr/local/bin/realmctl \
+  /etc/systemd/system/realm.service.d/50-realmctl.conf
 sudo systemctl daemon-reload
 ```
 
-This keeps `/etc/realm/config.toml` for reuse. For a standalone binary installation, just remove `/usr/local/bin/realm` after stopping the process.
+This keeps `/etc/realm/config.toml` and any `/etc/realm/conf.d` rules and backups for reuse. For a standalone installation, remove `/usr/local/bin/realm` and `/usr/local/bin/realmctl` after stopping the process.
 
 ### Troubleshooting
 
@@ -218,6 +221,7 @@ git clone https://github.com/phungvanquy/realm.git &&
 cd realm &&
 cargo build --locked --release &&
 sudo install -m 0755 target/release/realm /usr/local/bin/realm &&
+sudo install -m 0755 realmctl /usr/local/bin/realmctl &&
 realm --version
 ```
 

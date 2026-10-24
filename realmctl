@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# Manage a flat directory of Realm rules. Configuration is read by Realm itself;
+# this script never sources configuration files or evaluates editor commands.
+set -euo pipefail
+umask 077
+
+config_dir=/etc/realm/conf.d
+service=realm.service
+work_dir=
+rule_path=
+rule_state=
+
+usage() {
+  cat <<'EOF'
+Manage named Realm relay rules on Linux.
+
+Usage: realmctl [--config-dir DIR] [--service NAME] COMMAND [arguments]
+
+Commands:
+  init [--import FILE]         Initialize configuration; optionally copy an existing config
+  add NAME --listen IP:PORT --remote HOST:PORT [--protocol tcp|udp|both] [--disabled]
+  list                        List rule names and their configured state
+  show NAME                   Print a rule's configuration
+  edit NAME                   Edit a temporary copy using VISUAL, EDITOR, or nano
+  enable NAME                 Enable a rule on the next service start
+  disable NAME                Disable a rule on the next service start
+  remove NAME                 Back up and remove a rule
+  apply                       Restart the service, or stop it if all rules are disabled
+  status                      Show systemd service status
+  logs [--follow]              Show the last 50 journal entries; optionally follow
+
+Options (before COMMAND):
+  --config-dir DIR             Absolute configuration directory (default: /etc/realm/conf.d)
+  --service NAME              systemd service (default: realm.service)
+  -h, --help                  Show this help
+
+Rules use NAME.toml or NAME.toml.disabled. IPv6 addresses must be bracketed.
+The service must be configured to read the same directory with realm -c DIR.
+File changes take effect when the service next starts; apply restarts it explicitly
+and interrupts existing connections. init does not install or start a service.
+Arbitrary TOML and listener availability are not validated by this script.
+EOF
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1."
+}
+
+cleanup() {
+  if [[ -n "$work_dir" ]]; then
+    rm -rf -- "$work_dir"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+valid_name() {
+  [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]]
+}
+
+require_name() {
+  valid_name "$1" || die 'Rule names must start with a letter or digit and contain at most 64 letters, digits, dots, underscores, or hyphens.'
+}
+
+require_regular_file() {
+  [[ -f "$1" && ! -L "$1" ]] || die "Expected a regular file, not a symlink: $1"
+}
+
+# Lock the directory inode: readers need no writable lock file, and every
+# realmctl writer (including apply and the editor session) uses the same lock.
+open_config() {
+  local mode="$1"
+  [[ -d "$config_dir" && ! -L "$config_dir" ]] || die "Configuration directory is missing or is a symlink: $config_dir. Run realmctl init first."
+  need_command flock
+  exec 9<"$config_dir"
+  flock --nonblock "$mode" 9 || die "Another realmctl command is using $config_dir. Try again when it finishes."
+  check_layout
+}
+
+check_layout() {
+  local path name
+  for path in "$config_dir"/*; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ ! -L "$path" && ! -d "$path" ]] || die "Use a flat configuration directory without symlinks: $path"
+    case "$path" in
+      "$config_dir/_global.toml") require_regular_file "$path" ;;
+      *.toml|*.toml.disabled)
+        require_regular_file "$path"
+        name="${path##*/}"
+        name="${name%.disabled}"
+        name="${name%.toml}"
+        require_name "$name"
+        [[ ! -e "$config_dir/$name.toml" || ! -e "$config_dir/$name.toml.disabled" ]] ||
+          die "Rule $name has both enabled and disabled files; resolve the duplicate first."
+        ;;
+      *.json) die "realmctl manages TOML filenames only. Import this config with init --import into a new directory: $path" ;;
+    esac
+  done
+}
+
+require_initialized() {
+  require_regular_file "$config_dir/_global.toml"
+}
+
+new_work_dir() {
+  work_dir="$(mktemp -d "$config_dir/.realmctl-work.XXXXXX")"
+}
+
+resolve_rule() {
+  local name="$1"
+  if [[ -e "$config_dir/$name.toml" ]]; then
+    rule_path="$config_dir/$name.toml"
+    rule_state=enabled
+  elif [[ -e "$config_dir/$name.toml.disabled" ]]; then
+    rule_path="$config_dir/$name.toml.disabled"
+    rule_state=disabled
+  else
+    die "Rule does not exist: $name"
+  fi
+  require_regular_file "$rule_path"
+}
+
+backup_rule() {
+  local path="$1" backup_dir="$config_dir/.realmctl-backups" backup
+  [[ ! -L "$backup_dir" ]] || die "Backup directory must not be a symlink: $backup_dir"
+  mkdir -p -- "$backup_dir"
+  chmod 0700 -- "$backup_dir"
+  backup="$(mktemp "$backup_dir/${path##*/}.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+  cp -- "$path" "$backup"
+  printf 'Backup: %s\n' "$backup"
+}
+
+print_invocation() {
+  printf 'realmctl'
+  if [[ "$config_dir" != /etc/realm/conf.d ]]; then printf ' --config-dir %q' "$config_dir"; fi
+  if [[ "$service" != realm.service ]]; then printf ' --service %q' "$service"; fi
+  printf ' %s' "$1"
+}
+
+changed() {
+  printf '%s Run ' "$1"
+  print_invocation apply
+  printf ' when ready.\n'
+}
+
+# Validate the address forms generated by add. Full Realm configuration
+# validation (including edited files and conflicts between listeners) is left
+# to a future native check command, rather than approximating a TOML parser.
+valid_ipv4() {
+  local value="$1" octet
+  local -a octets
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$value"
+  for octet in "${octets[@]}"; do
+    [[ "$octet" == 0 || "$octet" != 0* ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+valid_ipv6() {
+  local value="$1" half part tail compressed=false count=0
+  local -a halves parts
+  [[ "$value" =~ ^[0-9a-fA-F:.]+$ ]] || return 1
+  if [[ "$value" == *.* ]]; then
+    tail="${value##*:}"
+    valid_ipv4 "$tail" || return 1
+    value="${value%:*}:0:0"
+  fi
+  if [[ "$value" == *::* ]]; then
+    compressed=true
+    halves=("${value%%::*}" "${value#*::}")
+  else
+    halves=("$value")
+  fi
+  for half in "${halves[@]}"; do
+    [[ -n "$half" ]] || continue
+    [[ "$half" != :* && "$half" != *: ]] || return 1
+    IFS=: read -r -a parts <<< "$half"
+    for part in "${parts[@]}"; do
+      [[ "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+      count=$((count + 1))
+    done
+  done
+  if [[ "$compressed" == true ]]; then
+    ((count < 8))
+  else
+    ((count == 8))
+  fi
+}
+
+valid_hostname() {
+  local value="${1%.}" label
+  local -a labels
+  [[ -n "$value" && ${#value} -le 253 && "$value" != *[!a-zA-Z0-9.-]* && "$value" != *[.] && "$value" != .* ]] || return 1
+  # Numeric dotted addresses must pass the stricter IPv4 check.
+  [[ "$value" == *[!0-9.]* ]] || return 1
+  IFS=. read -r -a labels <<< "$value"
+  for label in "${labels[@]}"; do
+    [[ "$label" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || return 1
+  done
+}
+
+validate_address() {
+  local kind="$1" value="$2" host port
+  if [[ "$value" =~ ^\[([^]]+)\]:([0-9]{1,5})$ ]]; then
+    host="${BASH_REMATCH[1]}" port="${BASH_REMATCH[2]}"
+    valid_ipv6 "$host" || die "Invalid IPv6 $kind address: $value"
+  elif [[ "$value" =~ ^([^:]+):([0-9]{1,5})$ ]]; then
+    host="${BASH_REMATCH[1]}" port="${BASH_REMATCH[2]}"
+    if ! valid_ipv4 "$host"; then
+      if [[ "$kind" != remote ]] || ! valid_hostname "$host"; then
+        die "Invalid $kind address: $value"
+      fi
+    fi
+  else
+    die "Use IP:PORT for listen and HOST:PORT for remote, with brackets around IPv6: $value"
+  fi
+  ((10#$port >= 1 && 10#$port <= 65535)) || die "Port must be between 1 and 65535: $value"
+}
+
+cmd_init() {
+  local source='' path
+  if [[ $# -gt 0 ]]; then
+    [[ $# -eq 2 && "$1" == --import ]] || die 'Usage: realmctl init [--import FILE]'
+    source="$2"
+    require_regular_file "$source"
+    [[ -s "$source" ]] || die "Cannot import an empty configuration: $source"
+  fi
+  [[ ! -L "$config_dir" ]] || die "Configuration directory must not be a symlink: $config_dir"
+  (umask 022; mkdir -p -- "$config_dir")
+  open_config --exclusive
+  if [[ -e "$config_dir/_global.toml" ]]; then
+    [[ -z "$source" ]] || die 'Import requires a new configuration directory.'
+    printf 'Already initialized: %s\n' "$config_dir"
+    return
+  fi
+  for path in "$config_dir"/*.toml "$config_dir"/*.toml.disabled; do
+    [[ ! -e "$path" ]] || die 'Initialize an empty directory; use init --import FILE to copy an existing configuration.'
+  done
+  new_work_dir
+  printf 'endpoints = []\n' > "$work_dir/_global.toml"
+  if [[ -n "$source" ]]; then
+    cp --preserve=mode,ownership -- "$source" "$work_dir/imported.toml"
+    mv -T -- "$work_dir/imported.toml" "$config_dir/imported.toml"
+  else
+    printf '\n[log]\nlevel = "info"\noutput = "stdout"\n' >> "$work_dir/_global.toml"
+  fi
+  chmod 0644 -- "$work_dir/_global.toml"
+  if ! mv -T -- "$work_dir/_global.toml" "$config_dir/_global.toml"; then
+    if [[ -n "$source" ]]; then rm -f -- "$config_dir/imported.toml"; fi
+    die 'Could not finish initialization.'
+  fi
+  printf 'Initialized %s. Configure %s to run realm -c %s.\n' "$config_dir" "$service" "$config_dir"
+  if [[ -n "$source" ]]; then
+    printf 'Copied the existing configuration into the rule imported; the source is unchanged.\n'
+  fi
+}
+
+cmd_add() {
+  [[ $# -ge 1 ]] || die 'Usage: realmctl add NAME --listen IP:PORT --remote HOST:PORT [--protocol tcp|udp|both] [--disabled]'
+  local name="$1" listen='' remote='' protocol='' disabled=false target no_tcp=false use_udp=false
+  require_name "$name"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --listen|--remote|--protocol)
+        [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value."
+        case "$1" in
+          --listen) [[ -z "$listen" ]] || die 'Duplicate --listen option.'; listen="$2" ;;
+          --remote) [[ -z "$remote" ]] || die 'Duplicate --remote option.'; remote="$2" ;;
+          --protocol) [[ -z "$protocol" ]] || die 'Duplicate --protocol option.'; protocol="$2" ;;
+        esac
+        shift 2
+        ;;
+      --disabled) [[ "$disabled" == false ]] || die 'Duplicate --disabled option.'; disabled=true; shift ;;
+      *) die "Unknown add option: $1" ;;
+    esac
+  done
+  [[ -n "$listen" && -n "$remote" ]] || die 'Both --listen and --remote are required.'
+  validate_address listen "$listen"
+  validate_address remote "$remote"
+  case "${protocol:-tcp}" in
+    tcp) ;;
+    udp) no_tcp=true; use_udp=true ;;
+    both) use_udp=true ;;
+    *) die 'Protocol must be tcp, udp, or both.' ;;
+  esac
+  open_config --exclusive
+  require_initialized
+  [[ ! -e "$config_dir/$name.toml" && ! -e "$config_dir/$name.toml.disabled" ]] || die "Rule already exists: $name"
+  target="$config_dir/$name.toml"
+  if [[ "$disabled" == true ]]; then target+=.disabled; fi
+  new_work_dir
+  printf '[[endpoints]]\nlisten = "%s"\nremote = "%s"\n\n[endpoints.network]\nno_tcp = %s\nuse_udp = %s\n' \
+    "$listen" "$remote" "$no_tcp" "$use_udp" > "$work_dir/rule.toml"
+  chmod 0644 -- "$work_dir/rule.toml"
+  mv -T -- "$work_dir/rule.toml" "$target"
+  changed "Added $name."
+}
+
+cmd_list() {
+  [[ $# -eq 0 ]] || die 'Usage: realmctl list'
+  open_config --shared
+  require_initialized
+  local path name state
+  printf '%-32s %s\n' NAME STATE
+  for path in "$config_dir"/*.toml "$config_dir"/*.toml.disabled; do
+    [[ -e "$path" && "$path" != "$config_dir/_global.toml" ]] || continue
+    name="${path##*/}"
+    state=enabled
+    if [[ "$name" == *.disabled ]]; then state=disabled; name="${name%.disabled}"; fi
+    printf '%-32s %s\n' "${name%.toml}" "$state"
+  done
+}
+
+cmd_edit() {
+  local name="$1" editor="${VISUAL:-${EDITOR:-nano}}" candidate
+  local -a editor_command
+  [[ "$editor" != *$'\n'* && "$editor" != *$'\r'* ]] || die 'Editor must be a command on one line.'
+  if command -v "$editor" >/dev/null 2>&1; then
+    editor_command=("$editor")
+  else
+    # Support common values such as "code --wait" without eval or shell expansion.
+    read -r -a editor_command <<< "$editor"
+  fi
+  [[ ${#editor_command[@]} -gt 0 ]] || die 'Editor command is empty.'
+  need_command "${editor_command[0]}"
+  new_work_dir
+  candidate="$work_dir/$name.toml"
+  cp -- "$rule_path" "$work_dir/original"
+  cp -- "$rule_path" "$candidate"
+  if ! "${editor_command[@]}" "$candidate" 9<&-; then
+    die 'Editor exited unsuccessfully; the original rule is unchanged.'
+  fi
+  require_regular_file "$candidate"
+  [[ -s "$candidate" ]] || die 'The edited rule is empty; the original rule is unchanged.'
+  if [[ ! -f "$rule_path" || -L "$rule_path" ]] || ! cmp -s -- "$work_dir/original" "$rule_path"; then
+    printf 'The original rule changed outside realmctl. Your edited copy is saved at %s\n' "$candidate" >&2
+    work_dir=
+    die 'Edit was not applied.'
+  fi
+  if cmp -s -- "$candidate" "$rule_path"; then
+    printf 'No changes to %s.\n' "$name"
+    return
+  fi
+  check_layout
+  cp --attributes-only --preserve=mode,ownership -- "$rule_path" "$candidate"
+  backup_rule "$rule_path"
+  mv -fT -- "$candidate" "$rule_path"
+  changed "Saved $name ($rule_state)."
+}
+
+cmd_rule() {
+  local command="$1" name target
+  shift
+  [[ $# -eq 1 ]] || die "Usage: realmctl $command NAME"
+  name="$1"
+  require_name "$name"
+  if [[ "$command" == show ]]; then open_config --shared; else open_config --exclusive; fi
+  require_initialized
+  resolve_rule "$name"
+  case "$command" in
+    show) cat -- "$rule_path" ;;
+    edit) cmd_edit "$name" ;;
+    enable|disable)
+      if [[ "$rule_state" == "${command}d" ]]; then
+        printf '%s is already %s.\n' "$name" "$rule_state"
+        return
+      fi
+      target="$config_dir/$name.toml"
+      if [[ "$command" == disable ]]; then target+=.disabled; fi
+      mv -T -- "$rule_path" "$target"
+      changed "Rule $name is now ${command}d."
+      ;;
+    remove)
+      backup_rule "$rule_path"
+      rm -- "$rule_path"
+      changed "Removed $name."
+      ;;
+  esac
+}
+
+cmd_apply() {
+  [[ $# -eq 0 ]] || die 'Usage: realmctl apply'
+  open_config --exclusive
+  require_initialized
+  need_command systemctl
+  [[ -s "$config_dir/_global.toml" ]] || die 'Shared configuration _global.toml is empty.'
+  local path enabled=false
+  for path in "$config_dir"/*.toml; do
+    [[ -e "$path" && "$path" != "$config_dir/_global.toml" ]] || continue
+    [[ -s "$path" ]] || die "Enabled rule is empty: $path"
+    enabled=true
+  done
+  if [[ "$enabled" == false ]]; then
+    systemctl stop -- "$service" || die "Could not stop $service."
+    printf 'No enabled rules; stopped %s.\n' "$service"
+    return
+  fi
+  printf 'Restarting %s; existing connections will be interrupted.\n' "$service"
+  systemctl restart -- "$service" || die "Could not restart $service. Check its service status and journal."
+  systemctl is-active --quiet -- "$service" || die "$service is not active. Check its service status and journal."
+  printf 'Restarted %s. Use ' "$service"
+  print_invocation logs
+  printf ' to check individual listeners.\n'
+}
+
+main() {
+  local command
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config-dir|--service)
+        [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value."
+        if [[ "$1" == --config-dir ]]; then config_dir="$2"; else service="$2"; fi
+        shift 2
+        ;;
+      -h|--help) usage; return ;;
+      --*) die "Unknown option: $1" ;;
+      *) break ;;
+    esac
+  done
+  [[ $# -gt 0 ]] || { usage; return; }
+  command="$1"
+  shift
+  [[ "$config_dir" == /* && "$config_dir" != *$'\n'* && "$config_dir" != *$'\r'* ]] || die '--config-dir must be an absolute path on one line.'
+  # A trailing slash must not hide a symlink from the directory checks.
+  while [[ "$config_dir" == */ && "$config_dir" != / ]]; do config_dir="${config_dir%/}"; done
+  [[ "$config_dir" != / && "$config_dir" != */. && "$config_dir" != */.. && "$config_dir" != */./* && "$config_dir" != */../* ]] || die 'Use a dedicated configuration directory without dot path components.'
+  [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$ ]] || die 'Invalid systemd service name.'
+  if [[ "$service" != *.service ]]; then service+=.service; fi
+  case "$command" in
+    init) cmd_init "$@" ;;
+    add) cmd_add "$@" ;;
+    list) cmd_list "$@" ;;
+    show|edit|enable|disable|remove) cmd_rule "$command" "$@" ;;
+    apply) cmd_apply "$@" ;;
+    status)
+      [[ $# -eq 0 ]] || die 'Usage: realmctl status'
+      need_command systemctl
+      systemctl status --no-pager -- "$service"
+      ;;
+    logs)
+      [[ $# -eq 0 || ( $# -eq 1 && "$1" == --follow ) ]] || die 'Usage: realmctl logs [--follow]'
+      need_command journalctl
+      journalctl --unit="$service" --lines=50 --no-pager "$@"
+      ;;
+    *) die "Unknown command: $command. Run realmctl --help for usage." ;;
+  esac
+}
+
+main "$@"

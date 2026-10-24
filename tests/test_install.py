@@ -77,7 +77,8 @@ else:
         checksum.write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
         return checksum
 
-    def package(self, arch="aarch64", binary="realm", content=None, symlink=False):
+    def package(self, arch="aarch64", binary="realm", content=None, symlink=False,
+                companion=None, companion_symlink=False):
         archive = self.archive(arch, binary)
         content = content or f"#!/bin/sh\necho 'Realm 2.9.6 ({arch}, {binary})'\n".encode()
         with tarfile.open(archive, "w:gz") as tar:
@@ -90,6 +91,16 @@ else:
             else:
                 member.size = len(content)
                 tar.addfile(member, io.BytesIO(content))
+            if companion is not None or companion_symlink:
+                member = tarfile.TarInfo("realmctl")
+                member.mode = 0o755
+                if companion_symlink:
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/bin/true"
+                    tar.addfile(member)
+                else:
+                    member.size = len(companion)
+                    tar.addfile(member, io.BytesIO(companion))
         self.checksum(archive)
         return archive
 
@@ -129,6 +140,46 @@ else:
             self.assert_success(self.run_installer("--version", "v2.9.6"), "aarch64", "realm")
             self.assertEqual(old.read(), "old binary")
             self.assertNotEqual(os.fstat(old.fileno()).st_ino, self.installed.stat().st_ino)
+
+    def test_installs_bundled_realmctl_with_full_and_slim_builds(self):
+        companion = (INSTALLER.parent / "realmctl").read_bytes()
+        for binary, args in (("realm", ()), ("realm-slim", ("--slim",))):
+            with self.subTest(binary=binary):
+                self.package(binary=binary, companion=companion)
+                result = self.run_installer(*args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                installed_ctl = self.install_dir / "realmctl"
+                self.assertEqual(installed_ctl.read_bytes(), companion)
+                self.assertEqual(installed_ctl.stat().st_mode & 0o777, 0o755)
+                help_text = subprocess.check_output([str(installed_ctl), "--help"], text=True)
+                self.assertIn("edit NAME", help_text)
+                self.assertEqual(set(self.install_dir.iterdir()), {self.installed, installed_ctl})
+
+    def test_old_release_preserves_existing_realmctl(self):
+        self.install_dir.mkdir(parents=True)
+        installed_ctl = self.install_dir / "realmctl"
+        installed_ctl.write_text("existing utility\n")
+        inode = installed_ctl.stat().st_ino
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("does not bundle realmctl", result.stdout)
+        self.assertEqual(installed_ctl.read_text(), "existing utility\n")
+        self.assertEqual(installed_ctl.stat().st_ino, inode)
+
+    def test_invalid_companion_preserves_both_installed_files(self):
+        self.install_dir.mkdir(parents=True)
+        self.installed.write_text("old binary\n")
+        installed_ctl = self.install_dir / "realmctl"
+        installed_ctl.write_text("old utility\n")
+        for companion, symlink in ((b"#!/bin/bash\nif then\n", False), (b"", False), (None, True)):
+            with self.subTest(companion=companion, symlink=symlink):
+                self.package(companion=companion, companion_symlink=symlink)
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Error:", result.stderr)
+                self.assertEqual(self.installed.read_text(), "old binary\n")
+                self.assertEqual(installed_ctl.read_text(), "old utility\n")
+                self.assertEqual(set(self.install_dir.iterdir()), {self.installed, installed_ctl})
 
     def test_failed_download_or_validation_preserves_installation(self):
         self.install_dir.mkdir(parents=True)

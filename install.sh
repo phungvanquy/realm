@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Install Realm from the public phungvanquy/realm releases.
+Install Realm and its bundled realmctl utility from public phungvanquy/realm releases.
 
 Usage: bash install.sh [options]
   --version VERSION    Install a tag such as v2.9.7 (default: latest release)
@@ -28,11 +28,16 @@ realm_binary=realm
 realm_install_dir=/usr/local/bin
 realm_tmp=
 realm_stage=
+realm_ctl_stage=
+realm_has_ctl=false
 realm_sudo=()
 
 cleanup() {
   if [[ -n "$realm_stage" ]]; then
     "${realm_sudo[@]}" rm -f -- "$realm_stage" || true
+  fi
+  if [[ -n "$realm_ctl_stage" ]]; then
+    "${realm_sudo[@]}" rm -f -- "$realm_ctl_stage" || true
   fi
   if [[ -n "$realm_tmp" ]]; then
     rm -rf -- "$realm_tmp"
@@ -120,6 +125,17 @@ chmod 0755 "$realm_tmp/$realm_binary"
 realm_binary_version="$("$realm_tmp/$realm_binary" --version)" ||
   die "The downloaded binary cannot run on this system. The existing installation was not changed."
 
+# Older releases contain only the relay binary. Take the companion exclusively
+# from the same verified archive when present, never from a separate moving URL.
+if tar --list --gzip --file "$realm_tmp/$realm_archive" -- realmctl >/dev/null 2>&1; then
+  tar --extract --gzip --file "$realm_tmp/$realm_archive" --directory "$realm_tmp" \
+    --no-same-owner -- realmctl || die 'Could not extract realmctl.'
+  [[ -s "$realm_tmp/realmctl" && -f "$realm_tmp/realmctl" && ! -L "$realm_tmp/realmctl" ]] ||
+    die 'The archive does not contain a nonempty regular realmctl script.'
+  bash -n "$realm_tmp/realmctl" || die 'The bundled realmctl script has invalid Bash syntax.'
+  realm_has_ctl=true
+fi
+
 if mkdir -p -- "$realm_install_dir" 2>/dev/null && [[ -w "$realm_install_dir" ]]; then
   realm_sudo=()
 elif [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
@@ -131,8 +147,19 @@ fi
 "${realm_sudo[@]}" mkdir -p -- "$realm_install_dir"
 realm_stage="$("${realm_sudo[@]}" mktemp "$realm_install_dir/.realm-install.XXXXXX")"
 "${realm_sudo[@]}" install -m 0755 -- "$realm_tmp/$realm_binary" "$realm_stage"
+if [[ "$realm_has_ctl" == true ]]; then
+  realm_ctl_stage="$("${realm_sudo[@]}" mktemp "$realm_install_dir/.realmctl-install.XXXXXX")"
+  "${realm_sudo[@]}" install -m 0755 -- "$realm_tmp/realmctl" "$realm_ctl_stage"
+fi
 "${realm_sudo[@]}" mv -fT -- "$realm_stage" "$realm_install_dir/realm"
 realm_stage=
+if [[ "$realm_has_ctl" == true ]]; then
+  "${realm_sudo[@]}" mv -fT -- "$realm_ctl_stage" "$realm_install_dir/realmctl"
+  realm_ctl_stage=
+  printf 'Installed %s/realmctl\n' "$realm_install_dir"
+else
+  printf 'This release does not bundle realmctl; any existing copy is unchanged.\n'
+fi
 
 printf 'Installed %s/realm\n%s\n' "$realm_install_dir" "$realm_binary_version"
 case ":$PATH:" in
