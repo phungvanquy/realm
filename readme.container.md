@@ -53,7 +53,7 @@ For UDP only, add `-t` and omit the TCP port mapping.
 
 ### Use a configuration file
 
-Create and edit `/etc/realm/config.toml` using the [configuration example in the README](readme.md#run-your-first-relay), then mount it read-only:
+Create and edit `/etc/realm/config.toml` using the [configuration file example](readme.md#use-a-configuration-file), then mount it read-only:
 
 ```bash
 sudo docker run -d --name realm --restart unless-stopped \

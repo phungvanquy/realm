@@ -8,11 +8,13 @@ A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and 
 [![build](https://github.com/phungvanquy/realm/actions/workflows/build.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/build.yml)
 [![docker](https://github.com/phungvanquy/realm/actions/workflows/docker.yml/badge.svg)](https://github.com/phungvanquy/realm/actions/workflows/docker.yml)
 
-[Install on Ubuntu](#install-on-ubuntu) · [First relay](#run-your-first-relay) · [Manage rules with realmctl](readme.realmctl.md) · [Run at boot](#run-at-boot-with-systemd) · [Docker / Compose](readme.container.md) · [Build from source](#build-from-source) · [Configuration](#configuration)
+[Install](#install-on-ubuntu) · [Set up relay rules](readme.realmctl.md#first-time-setup) · [Edit a rule](readme.realmctl.md#editing) · [Docker / Compose](readme.container.md) · [Configuration reference](#configuration)
+
+`realm` forwards TCP and UDP traffic. `realmctl` manages named rules, such as `web` or `dns`, and applies changes to the systemd service.
 
 ## Install on Ubuntu
 
-Use a prebuilt binary on 64-bit Ubuntu 22.04 or newer. The commands below select AMD64 or ARM64 automatically and install `realm` to `/usr/local/bin`.
+Use these commands on 64-bit Ubuntu 22.04 or newer. The installer selects AMD64 or ARM64 automatically.
 
 ### One-line install
 
@@ -20,7 +22,7 @@ Use a prebuilt binary on 64-bit Ubuntu 22.04 or newer. The commands below select
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash
 ```
 
-The [installer](install.sh) detects your CPU, downloads the latest public release, verifies its SHA-256 checksum, and installs the full binary and bundled `realmctl` script. Older releases without `realmctl` still install successfully. No GitHub account, token, or GitHub CLI is needed. It uses `sudo` if required to write to `/usr/local/bin`.
+This installs **both `realm` and `realmctl`** to `/usr/local/bin`. The [installer](install.sh) verifies the download's SHA-256 checksum and uses `sudo` when needed. No GitHub account or token is required.
 
 If `curl` is missing, install it first:
 
@@ -29,19 +31,31 @@ sudo apt update
 sudo apt install -y curl ca-certificates
 ```
 
-Check the installation:
+Check that both commands are available:
 
 ```bash
 realm --version
+realmctl --help
 ```
 
-You can choose a version, install the smaller TCP/UDP build, or install for your own user without sudo:
+Choose your next step:
+
+| What you want to do | Guide |
+| --- | --- |
+| Set up a server with named rules | [First-time setup with realmctl](readme.realmctl.md#first-time-setup) — add a rule, create the service, and start forwarding. |
+| Keep your existing Realm service and configuration | [Migrate to realmctl](readme.realmctl.md#migrate-an-existing-configuration). |
+| Change rules on an already configured server | [Everyday commands](readme.realmctl.md#commands) and [editing](readme.realmctl.md#editing). |
+| Try a relay in the terminal | [Run your first relay](#run-your-first-relay). |
+| Run in a container | [Docker / Compose](readme.container.md). |
+
+<details>
+<summary>Install a specific version, the slim build, or without sudo</summary>
 
 ```bash
 # A specific release (with or without the v prefix)
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --version v2.9.7
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --version v2.9.8
 
-# Slim build, installed as realm
+# Smaller TCP/UDP build, installed as realm; includes realmctl
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --slim
 
 # Install for the current user
@@ -50,6 +64,10 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Options can be combined. For a user installation, add the `export PATH` line to `~/.bashrc` to keep it in future terminals. The systemd example below uses the default `/usr/local/bin/realm` path.
+
+`realmctl` was introduced in v2.9.8. Selecting an older release installs only `realm` and leaves any existing `realmctl` unchanged.
+
+</details>
 
 <details>
 <summary>Download in your browser instead</summary>
@@ -66,30 +84,19 @@ In the download directory, verify and extract the archive. For AMD64:
 ```bash
 sha256sum --check realm-x86_64-unknown-linux-gnu.tar.gz.sha256 &&
 tar -xzf realm-x86_64-unknown-linux-gnu.tar.gz &&
-sudo install -m 0755 realm /usr/local/bin/realm
+sudo install -m 0755 realm /usr/local/bin/realm &&
+sudo install -m 0755 realmctl /usr/local/bin/realmctl
 realm --version
+realmctl --help
 ```
 
 For ARM64, replace `x86_64` with `aarch64`. The `realm-slim-*` archives contain a smaller `realm-slim` binary for basic TCP/UDP forwarding; install that file as `realm` with `sudo install -m 0755 realm-slim /usr/local/bin/realm`.
 
 </details>
 
-### Prefer Docker?
-
-With [Docker installed](https://docs.docker.com/engine/install/ubuntu/), replace `192.168.1.100:443` with your destination and run:
-
-```bash
-sudo docker run -d --name realm --restart unless-stopped \
-  -p 5000:5000/tcp \
-  ghcr.io/phungvanquy/realm:main \
-  -l 0.0.0.0:5000 -r 192.168.1.100:443
-```
-
-Docker selects AMD64 or ARM64 automatically. See the [container guide](readme.container.md) for logs, UDP, configuration files, Compose, and updates.
-
 ## Run your first relay
 
-Replace `192.168.1.100:443` with the address and port of the service you want to reach:
+For a quick test in your terminal, replace `192.168.1.100:443` with the address and port of your destination service:
 
 ```bash
 realm -l 0.0.0.0:5000 -r 192.168.1.100:443
@@ -99,7 +106,11 @@ Connections to port `5000` on this machine are forwarded to that destination. Th
 
 TCP is enabled by default. Add `-u` to forward UDP as well, or `-u -t` for UDP only.
 
-For a persistent configuration, create `/etc/realm/config.toml`:
+To keep the relay running after you close the terminal, press **Ctrl+C**, then follow the [realmctl setup guide](readme.realmctl.md#first-time-setup).
+
+### Use a configuration file
+
+For manual setup or Docker, save the same relay in `/etc/realm/config.toml`. Replace the example destination before running it:
 
 ```bash
 sudo install -d -m 0755 /etc/realm
@@ -117,18 +128,21 @@ remote = "192.168.1.100:443"
 EOF
 ```
 
-Edit the destination before starting. Set `use_udp = true` if you also need UDP:
+Set `use_udp = true` if you also need UDP. To edit and try the file:
 
 ```bash
 sudo nano /etc/realm/config.toml
 realm -c /etc/realm/config.toml
 ```
 
-Check that the relay starts, then press **Ctrl+C** before setting up the service below so port `5000` is free.
+Press **Ctrl+C** to stop the foreground process before starting a service on the same port.
 
 ## Run at boot with systemd
 
-For multiple named rules, the [realmctl guide](readme.realmctl.md) covers adding, editing, enabling, and disabling rules, with service setup and migration from an existing configuration. The setup below uses a single configuration file.
+For named rules, follow the [realmctl setup guide](readme.realmctl.md#first-time-setup). If you already have a service using `/etc/realm/config.toml`, follow the [migration steps](readme.realmctl.md#migrate-an-existing-configuration).
+
+<details>
+<summary>Run a single configuration file with systemd</summary>
 
 After installing the binary and creating the configuration above, create a service:
 
@@ -167,9 +181,11 @@ sudo journalctl -u realm -f
 
 After editing `/etc/realm/config.toml`, apply the changes with `sudo systemctl restart realm`.
 
-### Update or remove
+</details>
 
-To update, repeat the [one-line install](#one-line-install), including any options such as `--slim` or `--install-dir` used for your installation. The installer verifies the new binary before replacing the old one. Your configuration stays in `/etc/realm/config.toml`. Restart a running systemd service to use the new binary:
+## Update or remove
+
+To update, repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. Your configuration and rule files under `/etc/realm` are preserved. Then restart a running service to use the new binary:
 
 ```bash
 sudo systemctl restart realm
@@ -186,17 +202,20 @@ sudo systemctl daemon-reload
 
 This keeps `/etc/realm/config.toml` and any `/etc/realm/conf.d` rules and backups for reuse. For a standalone installation, remove `/usr/local/bin/realm` and `/usr/local/bin/realmctl` after stopping the process.
 
-### Troubleshooting
+## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
 | `realm: command not found` | Run `/usr/local/bin/realm --version` and ensure `/usr/local/bin` is in your `PATH`. |
+| `realmctl: command not found` | Repeat the one-line install without pinning an older release. `realmctl` is included starting with v2.9.8. |
 | `Exec format error` | Use the installer to select the binary matching `uname -m`; 32-bit ARM builds are not provided by this fork. |
 | Release download fails | Check access to GitHub and confirm the requested version exists in [Releases](https://github.com/phungvanquy/realm/releases). |
 | Checksum verification fails | Retry the download. The installer leaves the existing binary intact on a verification failure. |
 | `Address already in use` | Stop the foreground relay before starting systemd, or choose a free listening port. |
 | Service does not start | Run `sudo journalctl -u realm -n 50 --no-pager`; check the binary path and configuration. |
 | Remote clients cannot connect | Check the listening address, TCP/UDP selection, firewall rules, and reachability of the destination from the relay host. |
+
+For editing, migration, or applying rules, see [realmctl troubleshooting](readme.realmctl.md#troubleshooting).
 
 ## Build from source
 
