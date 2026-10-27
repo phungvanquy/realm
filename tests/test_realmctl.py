@@ -1,6 +1,7 @@
 """Exercise realmctl in private directories with mocked service commands."""
 
 import fcntl
+import base64
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,8 @@ import sys
 import tempfile
 import time
 import unittest
+
+from realmctl_fakes import CHECKER
 
 
 REALMCTL = Path(__file__).resolve().parents[1] / "realmctl"
@@ -34,12 +37,26 @@ class RealmctlTests(unittest.TestCase):
             "EDITOR": "",
             "REALMCTL_TEST_LOG": str(self.log),
             "REALMCTL_UNIT_DIR": str(self.units),
+            "REALMCTL_TEST_ROOT": str(self.root),
+            "REALMCTL_START_TIMEOUT": "1",
         }
+        realm = self.mock('realm', CHECKER)
+        for name in ('realm.service', 'realm-test.service'):
+            (self.units / name).write_text('# Managed by realmctl. Use realmctl setup to update this file.\n'
+                                          '# realmctl-config-base64: ' + base64.b64encode(str(self.config).encode()).decode() + '\n'
+                                          '# realmctl-binary-base64: ' + base64.b64encode(str(realm).encode()).decode() + '\n')
         self.mock("systemctl", """
 import json, os, sys
+from pathlib import Path
 with open(os.environ['REALMCTL_TEST_LOG'], 'a') as log:
     log.write(json.dumps(sys.argv) + '\\n')
-sys.exit(int(os.environ.get('REALMCTL_TEST_' + sys.argv[1].upper().replace('-', '_'), '0')))
+failure = int(os.environ.get('REALMCTL_TEST_' + sys.argv[1].upper().replace('-', '_'), '0'))
+if failure: sys.exit(failure)
+state = Path(os.environ['REALMCTL_TEST_ROOT']) / 'active'
+if sys.argv[1] in ('start', 'restart'): state.touch()
+if sys.argv[1] == 'stop': state.unlink(missing_ok=True)
+if sys.argv[1] == 'show': print('123' if state.exists() else '0')
+if sys.argv[1] == 'is-active': sys.exit(0 if state.exists() else 3)
 """)
         self.mock("journalctl", """
 import json, os, sys
@@ -116,7 +133,7 @@ with open(os.environ['REALMCTL_TEST_LOG'], 'a') as log:
         imported_stat = (self.config / "imported.toml").stat()
         self.assertEqual((imported_stat.st_uid, imported_stat.st_gid), (source.stat().st_uid, source.stat().st_gid))
         self.assertEqual((self.config / "_global.toml").read_text(), "endpoints = []\n")
-        self.run_ctl("init", "--import", str(source), ok=False)
+        self.run_ctl("init", "--import", str(source))
         self.assertEqual(self.calls(), [])
 
     def test_bad_import_does_not_initialize(self):
@@ -133,6 +150,33 @@ with open(os.environ['REALMCTL_TEST_LOG'], 'a') as log:
         self.run_ctl("init", ok=False)
         self.assertEqual(rule.read_text(), "endpoints = []\n")
         self.assertFalse((self.config / "_global.toml").exists())
+
+    def test_import_can_resume_after_sigkill_between_visible_files(self):
+        source = self.root / 'old.toml'
+        source.write_text('endpoints = []\n')
+        marker = self.root / 'interrupted'
+        self.mock('mv', f"""
+import os, signal, subprocess, sys
+from pathlib import Path
+result = subprocess.run(['/usr/bin/mv', *sys.argv[1:]])
+marker = Path({str(marker)!r})
+if result.returncode == 0 and sys.argv[-1].endswith('/imported.toml') and not marker.exists():
+    marker.touch()
+    os.kill(os.getppid(), signal.SIGKILL)
+sys.exit(result.returncode)
+""")
+        self.run_ctl('init', '--import', str(source), ok=False)
+        self.assertTrue((self.config / 'imported.toml').exists())
+        self.assertFalse((self.config / '_global.toml').exists())
+        self.run_ctl('init', '--import', str(source))
+        self.assertEqual((self.config / 'imported.toml').read_text(), source.read_text())
+        self.assertTrue((self.config / '_global.toml').exists())
+        self.assertFalse((self.config / '.realmctl-init').exists())
+
+    def test_hidden_configuration_directory_is_rejected(self):
+        hidden = self.root / '.rules'
+        self.run_ctl('init', config=hidden, ok=False)
+        self.assertFalse(hidden.exists())
 
     def test_all_protocols_and_disabled_add(self):
         self.init()
@@ -424,7 +468,8 @@ time.sleep(30)
         self.init()
         self.add()
         self.run_ctl("--service", "realm-test", "apply")
-        self.assertEqual(self.calls(), [["restart", "--", "realm-test.service"], ["is-active", "--quiet", "--", "realm-test.service"]])
+        mutations = [call for call in self.calls() if call[0] in ('start', 'restart', 'stop')]
+        self.assertEqual(mutations, [["restart", "--", "realm-test.service"]])
         self.run_ctl("disable", "web")
         self.run_ctl("apply")
         self.assertEqual(self.calls()[-1], ["stop", "--", "realm.service"])

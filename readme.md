@@ -150,7 +150,9 @@ realmctl status
 
 `setup` creates the configuration and systemd service and enables startup at boot. `apply` starts forwarding. Later, use `realmctl edit web` to change a rule and `realmctl apply` to restart with those changes. New services run as a temporary unprivileged user and can listen on ports below `1024`.
 
-These service commands require the current repository script. If `realmctl --help` does not list `setup`, [install it from your checkout](readme.realmctl.md#install-from-source-and-development-checks).
+These service commands require **both the current Realm binary and realmctl script**. The new validation and recovery features are not in v2.9.8; [build and install both from your checkout](readme.realmctl.md#install-from-source-and-development-checks). Verify `realm check --version` succeeds, then rerun `setup` once for an existing managed service to register its binary path.
+
+`realmctl check` validates enabled rules without restarting. `apply` checks configuration and systemd's effective command before restarting, verifies every expected listener afterward, and restores the last verified configuration if startup fails. The first successful start/apply establishes that snapshot. Use `realmctl recover` after an interrupted apply; see [validation and recovery](readme.realmctl.md#validation-and-recovery) for limits and details.
 
 For an existing single-file configuration, use `sudo realmctl setup --import /etc/realm/config.toml` instead. If you already have realmctl rules and a manual service, use `sudo realmctl setup --adopt`. See [migration](readme.realmctl.md#migrate-an-existing-configuration) for details.
 
@@ -166,7 +168,7 @@ Use `realmctl service enable` or `realmctl service disable` with `sudo` to chang
 
 ## Update or remove
 
-To update, repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. Your configuration and rule files under `/etc/realm` are preserved. Then restart a running service to use the new binary:
+For a release installation, repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. For the repository version described above, rebuild and install both commands from the same checkout until these features are released. Your configuration and rule files under `/etc/realm` are preserved. Then restart a running service to use the new binary:
 
 ```bash
 sudo realmctl restart
@@ -201,7 +203,7 @@ Install build tools on Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential ca-certificates cmake curl git perl pkg-config
+sudo apt install -y build-essential ca-certificates cmake curl git libclang-dev perl pkg-config
 ```
 
 Install Rust using [rustup](https://rustup.rs/) if it is not already installed:

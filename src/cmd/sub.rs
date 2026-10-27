@@ -5,6 +5,7 @@ use crate::conf::{FullConf, LegacyConf};
 #[allow(clippy::let_and_return)]
 pub fn add_all(app: Command) -> Command {
     let app = add_convert(app);
+    let app = app.subcommand(crate::check::command());
     app
 }
 

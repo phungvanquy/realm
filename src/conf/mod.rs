@@ -81,33 +81,47 @@ impl FullConf {
     }
 
     pub fn from_conf_file(file: &str) -> Self {
-        let mtd = fs::metadata(file).unwrap_or_else(|e| panic!("failed to open {}: {}", file, e));
+        Self::try_from_conf_file(file).unwrap_or_else(|e| panic!("failed to load {}: {}", file, e))
+    }
+
+    /// Load configuration without starting listeners or hiding traversal errors.
+    /// The check command and normal startup must use exactly the same loader.
+    pub fn try_from_conf_file(file: &str) -> Result<Self> {
+        let mtd = fs::metadata(file)?;
 
         if mtd.is_file() {
-            let conf = fs::read_to_string(file).unwrap_or_else(|e| panic!("failed to open {}: {}", file, e));
-            match Self::from_conf_str(&conf) {
-                Ok(x) => return x,
-                Err(e) => panic!("failed to parse {}: {}", file, e),
-            }
+            return Self::from_conf_str(&fs::read_to_string(file)?);
+        }
+        if !mtd.is_dir() {
+            return Err(Error::other("configuration must be a regular file or directory"));
+        }
+        // Resolve relative roots such as "." before WalkDir's hidden-entry
+        // filter; otherwise the entire directory can be silently skipped.
+        let directory = fs::canonicalize(file)?;
+        if [std::path::Path::new(file), directory.as_path()].iter().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        }) {
+            return Err(Error::other("configuration directory name must not start with '.'"));
         }
 
         let mut full_conf = FullConf::default();
-        for entry in WalkDir::new(file)
+        for entry in WalkDir::new(directory)
             .follow_links(true)
+            .sort_by_file_name()
             .into_iter()
             .filter_entry(|e| e.file_name().to_str().is_some_and(|x| !x.starts_with('.')))
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().is_some_and(|s| s == "toml" || s == "json"))
         {
-            let conf_part = fs::read_to_string(entry.path())
-                .unwrap_or_else(|e| panic!("failed to open {}: {}", entry.path().to_string_lossy(), e));
-
+            let entry = entry.map_err(Error::other)?;
+            if !entry.file_type().is_file() || !entry.path().extension().is_some_and(|s| s == "toml" || s == "json") {
+                continue;
+            }
+            let conf_part = fs::read_to_string(entry.path())?;
             let conf_part = Self::from_conf_str(&conf_part)
-                .unwrap_or_else(|e| panic!("failed to parse {}: {}", entry.path().to_string_lossy(), e));
+                .map_err(|e| Error::other(format!("{}: {}", entry.path().display(), e)))?;
             full_conf.take_fields(conf_part);
         }
-        full_conf
+        Ok(full_conf)
     }
 
     pub fn from_conf_str(s: &str) -> Result<Self> {

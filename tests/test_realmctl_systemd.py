@@ -5,6 +5,7 @@ No persistent unit or boot enablement is created. All test resources are removed
 """
 
 import os
+import hashlib
 from pathlib import Path
 import shutil
 import socket
@@ -42,6 +43,7 @@ class RealmctlSystemdTests(unittest.TestCase):
         self.unit_dir = Path('/run/systemd/system')
         self.unit = self.unit_dir / self.service
         self.env = {**os.environ, 'REALMCTL_UNIT_DIR': str(self.unit_dir)}
+        self.env['REALMCTL_START_TIMEOUT'] = '3'
         self.env.pop('REALM_CONF', None)
         self.addCleanup(self.cleanup_service)
 
@@ -50,8 +52,10 @@ class RealmctlSystemdTests(unittest.TestCase):
         self.unit.unlink(missing_ok=True)
         shutil.rmtree(self.unit_dir / f'{self.service}.d', ignore_errors=True)
         backup_dir = self.unit_dir / '.realmctl-backups'
-        for path in backup_dir.glob(f'{self.service}.*'):
+        key = hashlib.sha256(self.service.encode()).hexdigest()
+        for path in backup_dir.glob(f'realmctl-{key}.*'):
             path.unlink()
+        shutil.rmtree(self.unit_dir / '.realmctl-transactions' / key, ignore_errors=True)
         try:
             backup_dir.rmdir()
         except OSError:
@@ -59,14 +63,17 @@ class RealmctlSystemdTests(unittest.TestCase):
         subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=20)
         subprocess.run(['systemctl', 'reset-failed', self.service], capture_output=True, timeout=10)
 
-    def ctl(self, *args):
+    def ctl(self, *args, ok=True):
         result = subprocess.run([str(REALMCTL), '--config-dir', str(self.config),
                                  '--service', self.service, *args],
                                 env=self.env, text=True, capture_output=True, timeout=30)
-        if result.returncode:
+        if ok and result.returncode:
             logs = subprocess.run(['journalctl', '--no-pager', '-n', '30', '-u', self.service],
                                   text=True, capture_output=True, timeout=10)
             self.fail(result.stdout + result.stderr + logs.stdout + logs.stderr)
+        if not ok:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result
         return result.stdout
 
     def exchange(self, port):
@@ -129,7 +136,8 @@ class RealmctlSystemdTests(unittest.TestCase):
         self.ctl('service', 'remove')
         self.assertFalse(self.unit.exists())
         self.assertTrue((self.config / 'web.toml').exists())
-        self.assertTrue(list((self.unit_dir / '.realmctl-backups').glob(f'{self.service}.*')))
+        key = hashlib.sha256(self.service.encode()).hexdigest()
+        self.assertTrue(list((self.unit_dir / '.realmctl-backups').glob(f'realmctl-{key}.*')))
 
     def test_adopt_active_service_and_remove_preserve_original_unit(self):
         destination = self.backend()
@@ -177,6 +185,77 @@ class RealmctlSystemdTests(unittest.TestCase):
         self.assertEqual(custom.read_text(), custom_content)
         self.assertFalse((dropins / '90-realmctl.conf').exists())
         self.assertNotEqual(subprocess.run(['systemctl', 'is-active', '--quiet', self.service]).returncode, 0)
+
+    def test_later_override_is_detected_and_adoption_is_rolled_back(self):
+        legacy_binary = self.root / 'realm-legacy'
+        shutil.copy2(self.binary, legacy_binary)
+        source = self.root / 'old.toml'
+        source.write_text('endpoints = []\n')
+        original = f'[Service]\nType=simple\nExecStart="{legacy_binary}" -c "{source}"\n'
+        self.unit.write_text(original)
+        dropins = self.unit_dir / f'{self.service}.d'
+        dropins.mkdir(mode=0o755)
+        custom = dropins / 'override.conf'
+        custom.write_text('[Service]\nExecStart=\n' + f'ExecStart="{legacy_binary}" -c "{source}"\n')
+        subprocess.run(['systemctl', 'daemon-reload'], check=True, capture_output=True, timeout=20)
+        result = self.ctl('setup', '--import', str(source), '--binary', str(self.binary), '--no-enable', ok=False)
+        self.assertIn('conflicting overrides', result.stderr)
+        self.assertEqual(self.unit.read_text(), original)
+        self.assertTrue(custom.exists())
+        self.assertFalse((dropins / '90-realmctl.conf').exists())
+        effective = subprocess.check_output(['systemctl', 'show', '--property=ExecStart', '--value', self.service], text=True)
+        self.assertIn(str(source), effective)
+
+    def test_invalid_edit_keeps_running_pid_and_failed_listener_rolls_back(self):
+        destination = self.backend()
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+            self.ctl('setup', '--binary', str(self.binary), '--no-enable')
+            self.ctl('add', 'web', '--listen', f'127.0.0.1:{port}', '--remote', f'127.0.0.1:{destination}', '--protocol', 'both')
+        self.ctl('apply')
+        self.exchange(port)
+        pid = subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value', self.service])
+        rule = self.config / 'web.toml'
+        original = rule.read_bytes()
+        rule.write_text('[[endpoints]\n')
+        result = self.ctl('apply', ok=False)
+        self.assertIn('running service was kept', result.stderr)
+        self.assertEqual(subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value', self.service]), pid)
+        self.exchange(port)
+        rule.write_bytes(original)
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            blocked = occupied.getsockname()[1]
+            self.ctl('add', 'blocked', '--listen', f'127.0.0.1:{blocked}', '--remote', f'127.0.0.1:{destination}')
+            result = self.ctl('apply', ok=False)
+            self.assertIn('Restored the last verified configuration', result.stderr)
+            self.assertFalse((self.config / 'blocked.toml').exists())
+            self.assertEqual(rule.read_bytes(), original)
+            self.exchange(port)
+            self.assertTrue(list(self.config.glob('.realmctl-state/*/snapshot.*/config/blocked.toml')))
+            self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+        # Validation runs as the caller, but startup must also catch access
+        # failures for the service's DynamicUser and restore original modes.
+        rule.chmod(0o600)
+        result = self.ctl('apply', ok=False)
+        self.assertIn('Restored the last verified configuration', result.stderr)
+        self.assertEqual(rule.stat().st_mode & 0o777, 0o644)
+        self.exchange(port)
+
+        # A conflicting drop-in added after setup must fail before restart.
+        pid = subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value', self.service])
+        dropins = self.unit_dir / f'{self.service}.d'
+        dropins.mkdir(mode=0o755)
+        override = dropins / 'override.conf'
+        override.write_text('[Service]\nType=simple\n')
+        subprocess.run(['systemctl', 'daemon-reload'], check=True, capture_output=True, timeout=20)
+        result = self.ctl('apply', ok=False)
+        self.assertIn('running service was kept', result.stderr)
+        self.assertEqual(subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value', self.service]), pid)
+        self.exchange(port)
 
 
 if __name__ == '__main__':

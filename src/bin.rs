@@ -22,6 +22,12 @@ cfg_if! {
 }
 
 fn main() {
+    // Administrative validation must never start a relay, even when a caller
+    // has REALM_CONF set. Keep the existing environment precedence for serving.
+    if env::args_os().nth(1).is_some_and(|arg| arg == "check") {
+        cmd::scan();
+        return;
+    }
     let conf = 'blk: {
         if let Ok(conf_str) = env::var(ENV_CONFIG) {
             if let Ok(conf) = FullConf::from_conf_str(&conf_str) {

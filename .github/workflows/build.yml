@@ -33,6 +33,8 @@ jobs:
             sh -ec '/realm/realm --version; /realm/realm-slim --version'
       - name: test realmctl with full and slim relays
         run: |
+          REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm" python3 -B -m unittest discover -s tests -p 'test_realm_check.py'
+          REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm-slim" python3 -B -m unittest discover -s tests -p 'test_realm_check.py'
           REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
           REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm-slim" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
       - name: test realmctl service management with systemd

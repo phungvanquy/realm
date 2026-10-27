@@ -54,6 +54,13 @@ pub fn scan() -> CmdInput {
             sub::handle_convert(sub_matches);
             return CmdInput::None;
         }
+        Some(("check", sub_matches)) => {
+            if let Err(error) = crate::check::run(sub_matches) {
+                eprintln!("Configuration check failed: {}", error);
+                std::process::exit(1);
+            }
+            return CmdInput::None;
+        }
         _ => {}
     };
 

@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from realmctl_fakes import CHECKER
+
 
 REALMCTL = Path(__file__).resolve().parents[1] / "realmctl"
 SYSTEMCTL = r'''
@@ -32,6 +34,9 @@ state_file = root / 'state.json'
 state = json.loads(state_file.read_text()) if state_file.exists() else {}
 unit = Path(os.environ['REALMCTL_UNIT_DIR']) / args[-1]
 if args[0] == 'show':
+    if '--property=MainPID' in args:
+        print('123' if state.get('active') else '0')
+        sys.exit(0)
     fragment = os.environ.get('REALMCTL_TEST_FRAGMENT', str(unit) if unit.exists() else '')
     load = os.environ.get('REALMCTL_TEST_LOAD', 'loaded' if fragment else 'not-found')
     canonical = os.environ.get('REALMCTL_TEST_ID', args[-1])
@@ -75,8 +80,9 @@ class RealmctlServiceTests(unittest.TestCase):
             'PATH': f'{self.bin}:{os.environ["PATH"]}',
             'REALMCTL_UNIT_DIR': str(self.units),
             'REALMCTL_TEST_ROOT': str(self.root),
+            'REALMCTL_START_TIMEOUT': '1',
         }
-        self.realm = self.mock('realm', "import os, sys\nassert 'REALM_CONF' not in os.environ\nassert sys.argv[1:] == ['--version']\nprint('Realm 2.9.8 [test]')\n")
+        self.realm = self.mock('realm', CHECKER)
         self.mock('systemctl', SYSTEMCTL)
         self.unit = self.units / 'realm.service'
         self.override = self.units / 'realm.service.d/90-realmctl.conf'
@@ -89,7 +95,7 @@ class RealmctlServiceTests(unittest.TestCase):
 
     def ctl(self, *args, ok=True, config=None):
         result = subprocess.run([str(REALMCTL), '--config-dir', str(config or self.config), *args],
-                                env=self.env, cwd=self.root, text=True, capture_output=True, timeout=10)
+                                env=self.env, cwd=self.root, text=True, capture_output=True, timeout=20)
         if ok:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -169,7 +175,7 @@ class RealmctlServiceTests(unittest.TestCase):
         self.realm.write_text('#!/bin/sh\nprintf "Not Realm\\n"\n')
         self.setup(ok=False)
         self.assertFalse(self.config.exists())
-        self.mock('realm', "print('Realm 2.9.8')")
+        self.mock('realm', CHECKER)
         self.fail_next('show')
         self.setup(ok=False)
         self.assertFalse(self.config.exists())
@@ -415,6 +421,199 @@ class RealmctlServiceTests(unittest.TestCase):
             self.setup('--binary', str(path), ok=False)
             self.assertFalse(self.unit.exists())
             self.assertFalse(self.config.exists())
+
+    def test_effective_service_mismatch_restores_previous_unit(self):
+        self.setup()
+        original = self.unit.read_bytes()
+        alternative = self.root / 'other-realm'
+        shutil.copy2(self.realm, alternative)
+        (self.root / 'verify-fail').touch()
+        result = self.setup('--binary', str(alternative), ok=False)
+        self.assertIn('effective service differs', result.stderr)
+        self.assertEqual(self.unit.read_bytes(), original)
+        self.assertEqual(list((self.units / '.realmctl-transactions').iterdir()), [])
+
+    def test_failed_listener_restores_verified_configuration_and_saves_candidate(self):
+        self.setup()
+        self.add()
+        rule = self.config / 'web.toml'
+        rule.chmod(0o640)
+        original = rule.read_bytes()
+        self.ctl('apply')
+        rule.write_bytes(original + b'# NOT_READY\n')
+        rule.chmod(0o600)
+        result = self.ctl('apply', ok=False)
+        self.assertIn('Restored the last verified configuration', result.stderr)
+        self.assertEqual(rule.read_bytes(), original)
+        self.assertEqual(rule.stat().st_mode & 0o777, 0o640)
+        self.assertTrue(self.state()['active'])
+        self.assertTrue(any(b'# NOT_READY' in path.read_bytes() for path in self.config.glob('.realmctl-state/*/snapshot.*/config/web.toml')))
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_invalid_candidate_never_restarts_a_working_service(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        previous_calls = len(self.calls())
+        with (self.config / 'web.toml').open('a') as rule:
+            rule.write('# INVALID\n')
+        result = self.ctl('apply', ok=False)
+        self.assertIn('running service was kept', result.stderr)
+        self.assertEqual(self.calls()[previous_calls:], [])
+        self.assertTrue(self.state()['active'])
+
+    def test_long_service_names_support_update_backup_and_removal(self):
+        name = 'r' * 120
+        self.ctl('--service', name, 'setup')
+        unit = self.units / (name + '.service')
+        original = unit.read_bytes()
+        self.ctl('--service', name, 'service', 'remove')
+        self.assertFalse(unit.exists())
+        self.assertEqual(self.backups()[0].read_bytes(), original)
+        self.assertLessEqual(len(self.backups()[0].name), 255)
+
+    def test_hidden_config_directory_is_rejected_before_setup(self):
+        self.ctl('setup', config=self.root / '.rules', ok=False)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.unit.exists())
+
+    def interrupt_after_unit_replace(self, signal_name):
+        self.setup('--no-enable')
+        original = self.unit.read_bytes()
+        alternative = self.root / 'other-realm'
+        shutil.copy2(self.realm, alternative)
+        marker = self.root / 'interrupted'
+        self.mock('mv', f"""
+import os, signal, subprocess, sys
+from pathlib import Path
+result = subprocess.run(['/usr/bin/mv', *sys.argv[1:]])
+marker = Path({str(marker)!r})
+if result.returncode == 0 and sys.argv[-1] == {str(self.unit)!r} and not marker.exists():
+    marker.touch()
+    os.kill(os.getppid(), signal.{signal_name})
+sys.exit(result.returncode)
+""")
+        result = subprocess.run([str(REALMCTL), '--config-dir', str(self.config), 'setup',
+                                 '--binary', str(alternative), '--no-enable'],
+                                env=self.env, capture_output=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        return original
+
+    def test_sigterm_during_unit_update_restores_the_original(self):
+        original = self.interrupt_after_unit_replace('SIGTERM')
+        self.assertEqual(self.unit.read_bytes(), original)
+        self.assertEqual(list((self.units / '.realmctl-transactions').iterdir()), [])
+
+    def test_sigkill_during_unit_update_is_recovered_by_the_next_command(self):
+        original = self.interrupt_after_unit_replace('SIGKILL')
+        self.assertNotEqual(self.unit.read_bytes(), original)
+        self.ctl('service', 'disable')
+        self.assertEqual(self.unit.read_bytes(), original)
+        self.assertEqual(list((self.units / '.realmctl-transactions').iterdir()), [])
+
+    def test_interrupted_apply_blocks_edits_until_recovery(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        original = (self.config / 'web.toml').read_bytes()
+        (self.config / 'web.toml').write_bytes(original + b'# pending change\n')
+        self.mock('systemctl', SYSTEMCTL + "\nimport signal\nif args[0] == 'restart':\n    os.kill(os.getppid(), signal.SIGKILL)\n")
+        result = subprocess.run([str(REALMCTL), '--config-dir', str(self.config), 'apply'],
+                                env=self.env, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, -9)
+        self.ctl('disable', 'web', ok=False)
+        self.mock('systemctl', SYSTEMCTL)
+        self.ctl('recover')
+        self.assertEqual((self.config / 'web.toml').read_bytes(), original)
+        self.assertTrue(self.state()['active'])
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_first_failed_start_keeps_candidate_and_stops_failed_service(self):
+        self.setup()
+        self.add()
+        rule = self.config / 'web.toml'
+        rule.write_text(rule.read_text() + '# NOT_READY\n')
+        result = self.ctl('start', ok=False)
+        self.assertIn('No previously verified snapshot', result.stderr)
+        self.assertIn('# NOT_READY', rule.read_text())
+        self.assertFalse(self.state()['active'])
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_wrong_checker_version_is_rejected_before_setup_writes(self):
+        self.mock('realm', CHECKER.replace("print('Realm-check 1')", "print('Realm 2.9.8')"))
+        result = self.setup(ok=False)
+        self.assertIn('Unsupported Realm check API', result.stderr)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.unit.exists())
+
+    def test_check_uses_the_registered_binary_and_supports_standalone_directories(self):
+        custom = self.root / 'custom-realm'
+        shutil.copy2(self.realm, custom)
+        self.setup('--binary', str(custom))
+        self.realm.unlink()  # The registered binary need not be on PATH.
+        self.ctl('check')
+        self.mock('realm', CHECKER)
+        standalone = self.root / 'standalone'
+        self.ctl('init', config=standalone)
+        custom.chmod(0o600)
+        self.ctl('check', config=standalone)
+
+    def test_snapshot_creation_failure_keeps_working_service(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        (self.root / 'calls').write_text('')
+        self.mock('mktemp', 'import sys\nsys.exit(1)\n')
+        result = self.ctl('apply', ok=False)
+        self.assertIn('Could not create a private configuration snapshot', result.stderr)
+        self.assertFalse(any(call[0] in ('start', 'stop', 'restart') for call in self.calls()))
+        self.assertTrue(self.state()['active'])
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_failed_recovery_keeps_journal_and_can_be_retried(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        rule = self.config / 'web.toml'
+        original = rule.read_bytes()
+        rule.write_bytes(original + b'# NOT_READY\n')
+        self.fail_next('start')  # The restart succeeds, but rollback's start fails.
+        result = self.ctl('apply', ok=False)
+        self.assertIn('Apply recovery is pending', result.stderr)
+        self.assertEqual(rule.read_bytes(), original)
+        self.assertTrue(list(self.config.glob('.realmctl-state/*/transaction')))
+        self.ctl('disable', 'web', ok=False)
+        self.ctl('recover')
+        self.assertTrue(self.state()['active'])
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_sigterm_during_apply_restores_verified_configuration(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        rule = self.config / 'web.toml'
+        original = rule.read_bytes()
+        rule.write_bytes(original + b'# pending change\n')
+        self.mock('systemctl', SYSTEMCTL + "\nimport signal\nif args[0] == 'restart':\n    os.kill(os.getppid(), signal.SIGTERM)\n")
+        result = self.ctl('apply', ok=False)
+        self.assertEqual(result.returncode, 143)
+        self.assertEqual(rule.read_bytes(), original)
+        self.assertTrue(self.state()['active'])
+        self.assertEqual(list(self.config.glob('.realmctl-state/*/transaction')), [])
+
+    def test_start_does_not_certify_pending_edits_for_an_active_service(self):
+        self.setup()
+        self.add()
+        self.ctl('apply')
+        pointer = next(self.config.glob('.realmctl-state/*/last-good'))
+        original = pointer.read_bytes()
+        rule = self.config / 'web.toml'
+        rule.write_text(rule.read_text() + '# pending change\n')
+        (self.root / 'calls').write_text('')
+        result = self.ctl('start', ok=False)
+        self.assertIn('Use apply', result.stderr)
+        self.assertEqual(pointer.read_bytes(), original)
+        self.assertFalse(any(call[0] in ('start', 'stop', 'restart') for call in self.calls()))
 
 
 if __name__ == '__main__':
