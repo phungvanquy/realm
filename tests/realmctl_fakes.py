@@ -6,7 +6,7 @@ from pathlib import Path
 args = sys.argv[1:]
 assert 'REALM_CONF' not in os.environ
 if args == ['--version']:
-    print('Realm 2.9.8 [test]')
+    print('Realm 2.10.0 [test]')
 elif args == ['check', '--version']:
     print('Realm-check 1')
 elif args and args[0] == 'check':

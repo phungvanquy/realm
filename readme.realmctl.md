@@ -10,13 +10,14 @@ These steps are for a new installation on Ubuntu 22.04 or newer with systemd. If
 
 ### 1. Install both commands
 
-This guide describes the repository version. Its validation and recovery features require **both `realm` and `realmctl` from the same build**. They are not included in v2.9.8. Until a release includes them, [build and install both from source](#install-from-source-and-development-checks); replacing only the Bash script is insufficient.
+This guide covers **v2.10.0 and later**. Its service management, validation, and recovery features require both `realm` and `realmctl` from the same release. The v2.9.8 helper only manages rules; replacing only that Bash script is insufficient.
 
-For packaged releases, the installer installs both commands:
+Install or update both commands with the installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash
 realm --version
+realm check --version
 realmctl --help
 ```
 
@@ -211,7 +212,7 @@ Import does **not** overwrite or merge existing rules. It requires a new directo
 | What you see | What to do |
 | --- | --- |
 | `realmctl: command not found` | Repeat the [one-line install](readme.md#one-line-install). v2.9.8 introduced `realmctl`. If `/usr/local/bin/realmctl --help` works, add `/usr/local/bin` to your `PATH`. |
-| `Unknown command: setup`, or binary lacks native `check` | [Install both commands from the same source build](#install-from-source-and-development-checks); v2.9.8 does not include these service safety features. |
+| `Unknown command: setup`, or binary lacks native `check` | Repeat the [one-line install](readme.md#one-line-install) to install both commands from v2.10.0 or later; v2.9.8 does not include these service safety features. |
 | Run setup before applying rules | Run `setup` once to register the service's binary; use `setup --adopt` for a manual service. |
 | Configuration directory is missing | Run `sudo realmctl setup` for a new setup, or `sudo realmctl setup --import /etc/realm/config.toml` to migrate. |
 | Import requires a new configuration directory | Keep your existing rules. Use `--config-dir` with another empty directory during setup; see [custom paths](#custom-paths-and-services). |

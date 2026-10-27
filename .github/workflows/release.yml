@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: test shell utilities
         run: |
+          test -s ".github/release-notes/$GITHUB_REF_NAME.md"
           bash -n install.sh
           bash -n realmctl
           python3 -B -m unittest discover -s tests -p 'test_*.py'
@@ -67,6 +68,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -78,21 +80,9 @@ jobs:
       - name: publish release
         uses: softprops/action-gh-release@v3
         with:
+          body_path: .github/release-notes/${{ github.ref_name }}.md
+          make_latest: true
           fail_on_unmatched_files: true
           files: |
             out/*.tar.gz
             out/*.sha256
-          body: |
-            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds, the Bash realmctl service and rule manager, and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
-
-            Install this version without a GitHub account or token:
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/${{ github.ref_name }}/install.sh | bash -s -- --version ${{ github.ref_name }}
-            ```
-
-            Add `--slim` for the smaller TCP/UDP build, or `--install-dir "$HOME/.local/bin"` to install without sudo.
-
-            See the [installation and systemd guide](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.md#install-on-ubuntu) for configuration and service setup.
-
-            Use [realmctl](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.realmctl.md) to set up the service, manage named rules, edit shared settings, and control forwarding.

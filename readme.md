@@ -53,7 +53,7 @@ Choose your next step:
 
 ```bash
 # A specific release (with or without the v prefix)
-curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --version v2.9.8
+curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --version v2.10.0
 
 # Smaller TCP/UDP build, installed as realm; includes realmctl
 curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh | bash -s -- --slim
@@ -150,7 +150,7 @@ realmctl status
 
 `setup` creates the configuration and systemd service and enables startup at boot. `apply` starts forwarding. Later, use `realmctl edit web` to change a rule and `realmctl apply` to restart with those changes. New services run as a temporary unprivileged user and can listen on ports below `1024`.
 
-These service commands require **both the current Realm binary and realmctl script**. The new validation and recovery features are not in v2.9.8; [build and install both from your checkout](readme.realmctl.md#install-from-source-and-development-checks). Verify `realm check --version` succeeds, then rerun `setup` once for an existing managed service to register its binary path.
+These service commands are included in **v2.10.0 and later**. Install both `realm` and `realmctl` from the same release with the [one-line installer](#one-line-install). Verify `realm check --version` succeeds, then rerun `setup` once for an existing managed service to register its binary path.
 
 `realmctl check` validates enabled rules without restarting. `apply` checks configuration and systemd's effective command before restarting, verifies every expected listener afterward, and restores the last verified configuration if startup fails. The first successful start/apply establishes that snapshot. Use `realmctl recover` after an interrupted apply; see [validation and recovery](readme.realmctl.md#validation-and-recovery) for limits and details.
 
@@ -168,9 +168,14 @@ Use `realmctl service enable` or `realmctl service disable` with `sudo` to chang
 
 ## Update or remove
 
-For a release installation, repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. For the repository version described above, rebuild and install both commands from the same checkout until these features are released. Your configuration and rule files under `/etc/realm` are preserved. Then restart a running service to use the new binary:
+Repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. It updates both commands and preserves your configuration and rule files under `/etc/realm`.
+
+When upgrading to v2.10.0, run `sudo realmctl setup` once for a service already managed by realmctl. For a manually created service, use `setup --adopt` with existing named rules, or `setup --import /etc/realm/config.toml` to migrate a single-file configuration into a new directory. See the [migration guide](readme.realmctl.md#migrate-an-existing-configuration) before importing.
+
+Then validate and restart the service to use the new binary:
 
 ```bash
+sudo realmctl check
 sudo realmctl restart
 ```
 
