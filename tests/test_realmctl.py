@@ -24,6 +24,8 @@ class RealmctlTests(unittest.TestCase):
         self.config = self.root / "config with spaces"
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.units = self.root / 'systemd'
+        self.units.mkdir()
         self.log = self.root / "service-calls"
         self.env = {
             **os.environ,
@@ -31,6 +33,7 @@ class RealmctlTests(unittest.TestCase):
             "VISUAL": "",
             "EDITOR": "",
             "REALMCTL_TEST_LOG": str(self.log),
+            "REALMCTL_UNIT_DIR": str(self.units),
         }
         self.mock("systemctl", """
 import json, os, sys
@@ -306,6 +309,19 @@ Path({str(rule)!r}).write_text('external change\\n')
         self.assertEqual(self.backups()[0].read_bytes(), original)
         self.assertEqual((self.config / ".realmctl-backups").stat().st_mode & 0o777, 0o700)
         self.run_ctl("remove", "web", ok=False)
+        self.assertEqual(self.calls(), [])
+
+    def test_shared_configuration_can_be_shown_and_edited_with_backup(self):
+        self.init()
+        self.add()
+        original = self.run_ctl('config', 'show').stdout
+        rule = (self.config / 'web.toml').read_bytes()
+        self.mock('editor', "from pathlib import Path\nimport sys\np=Path(sys.argv[1]); p.write_text(p.read_text().replace('info', 'debug'))")
+        self.env['EDITOR'] = 'editor'
+        self.run_ctl('config', 'edit')
+        self.assertEqual(self.run_ctl('config', 'show').stdout, original.replace('info', 'debug'))
+        self.assertEqual(self.backups()[0].read_text(), original)
+        self.assertEqual((self.config / 'web.toml').read_bytes(), rule)
         self.assertEqual(self.calls(), [])
 
     def test_backup_or_atomic_replace_failure_keeps_original(self):

@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# Manage a flat directory of Realm rules. Configuration is read by Realm itself;
+# Manage the Realm service and a flat rule directory. Realm reads configuration;
 # this script never sources configuration files or evaluates editor commands.
 set -euo pipefail
 umask 077
 
 config_dir=/etc/realm/conf.d
 service=realm.service
+# Override only when using another systemd unit search directory (or mocks).
+unit_dir=${REALMCTL_UNIT_DIR:-/etc/systemd/system}
 work_dir=
+service_work_dir=
 rule_path=
 rule_state=
+service_marker='# Managed by realmctl. Use realmctl setup to update this file.'
 
 usage() {
   cat <<'EOF'
-Manage named Realm relay rules on Linux.
+Manage the Realm service and named relay rules on Linux.
 
 Usage: realmctl [--config-dir DIR] [--service NAME] COMMAND [arguments]
 
 Commands:
+  setup [--import FILE] [--binary PATH] [--adopt] [--no-enable]
+                              Initialize rules, install the service, and enable it at boot
   init [--import FILE]         Initialize configuration; optionally copy an existing config
   add NAME --listen IP:PORT --remote HOST:PORT [--protocol tcp|udp|both] [--disabled]
   list                        List rule names and their configured state
@@ -25,7 +31,12 @@ Commands:
   enable NAME                 Enable a rule on the next service start
   disable NAME                Disable a rule on the next service start
   remove NAME                 Back up and remove a rule
+  config show / edit          Inspect or edit shared logging, DNS, and network settings
   apply                       Restart the service, or stop it if all rules are disabled
+  start / stop / restart      Control the running service
+  service enable / disable    Enable or disable automatic startup at boot
+  service show                Show the effective systemd unit and overrides
+  service remove              Stop, disable, and remove files created by setup
   status                      Show systemd service status
   logs [--follow]              Show the last 50 journal entries; optionally follow
 
@@ -34,10 +45,15 @@ Options (before COMMAND):
   --service NAME              systemd service (default: realm.service)
   -h, --help                  Show this help
 
-Rules use NAME.toml or NAME.toml.disabled. IPv6 addresses must be bracketed.
-The service must be configured to read the same directory with realm -c DIR.
-File changes take effect when the service next starts; apply restarts it explicitly
-and interrupts existing connections. init does not install or start a service.
+Quick start: sudo realmctl setup
+            sudo realmctl add web --listen 0.0.0.0:5000 --remote 192.168.1.100:443
+            sudo realmctl apply
+
+setup keeps existing rules and does not start or restart the service. Use --adopt
+to manage an existing service, or --import FILE to migrate its configuration.
+init remains available for configuration-only use. Rules use NAME.toml or
+NAME.toml.disabled. IPv6 addresses must be bracketed. File changes take effect on
+the next service start; apply/restart interrupt existing connections.
 Arbitrary TOML and listener availability are not validated by this script.
 EOF
 }
@@ -54,6 +70,9 @@ need_command() {
 cleanup() {
   if [[ -n "$work_dir" ]]; then
     rm -rf -- "$work_dir"
+  fi
+  if [[ -n "$service_work_dir" ]]; then
+    rm -rf -- "$service_work_dir"
   fi
 }
 trap cleanup EXIT
@@ -256,7 +275,9 @@ cmd_init() {
     if [[ -n "$source" ]]; then rm -f -- "$config_dir/imported.toml"; fi
     die 'Could not finish initialization.'
   fi
-  printf 'Initialized %s. Configure %s to run realm -c %s.\n' "$config_dir" "$service" "$config_dir"
+  printf 'Initialized %s. Use ' "$config_dir"
+  print_invocation setup
+  printf ' to configure the service.\n'
   if [[ -n "$source" ]]; then
     printf 'Copied the existing configuration into the rule imported; the source is unchanged.\n'
   fi
@@ -386,27 +407,342 @@ cmd_rule() {
   esac
 }
 
-cmd_apply() {
-  [[ $# -eq 0 ]] || die 'Usage: realmctl apply'
+cmd_config() {
+  [[ $# -eq 1 && ( "$1" == show || "$1" == edit ) ]] || die 'Usage: realmctl config show|edit'
+  if [[ "$1" == show ]]; then open_config --shared; else open_config --exclusive; fi
+  require_initialized
+  rule_path="$config_dir/_global.toml"
+  rule_state='shared settings'
+  if [[ "$1" == show ]]; then cat -- "$rule_path"; else cmd_edit _global; fi
+}
+
+# Service operations always acquire the unit-directory lock before the config
+# lock. This also serializes setup calls that select different config directories
+# for the same service. Rule-only commands acquire just the config lock.
+lock_units() {
+  need_command flock
+  [[ -d "$unit_dir" && ! -L "$unit_dir" ]] || die "Expected a systemd unit directory, not a symlink: $unit_dir"
+  exec 8<"$unit_dir"
+  flock --nonblock --exclusive 8 || die 'Another realmctl command is changing services. Try again when it finishes.'
+}
+
+is_managed_unit() {
+  local first
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  IFS= read -r first < "$1" || return 1
+  [[ "$first" == "$service_marker" ]]
+}
+
+check_service_target() {
+  local path line recorded='' expected
+  expected="$(printf '%s' "$config_dir" | base64 --wrap=0)"
+  # An adopted service uses the override; a new service uses the main unit.
+  for path in "$unit_dir/$service.d/90-realmctl.conf" "$unit_dir/$service"; do
+    is_managed_unit "$path" || continue
+    while IFS= read -r line; do
+      if [[ "$line" == '# realmctl-config-base64: '* ]]; then
+        recorded="${line#\# realmctl-config-base64: }"
+        break
+      fi
+    done < "$path"
+    [[ "$recorded" == "$expected" ]] || die "$service is configured for a different directory. Select the matching --config-dir or run setup to change it; use realmctl service show to inspect the service."
+    return
+  done
+  # Keep supporting services set up manually with earlier realmctl releases.
+}
+
+# Quote a literal systemd ExecStart argument. systemd applies its own escaping,
+# specifier expansion (%); shell quoting is not sufficient here. ExecStart uses
+# the ':' prefix to disable environment expansion for all literal arguments.
+unit_argument() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '"%s"' "$value"
+}
+
+service_header() {
+  # Encoding prevents special path characters (including a final backslash)
+  # from becoming systemd comment continuations or directives.
+  printf '%s\n# realmctl-config-base64: ' "$service_marker"
+  printf '%s' "$config_dir" | base64 --wrap=0
+  printf '\n'
+}
+
+service_command() {
+  printf 'ExecStart='
+  unit_argument ":$1"
+  printf ' -c '
+  unit_argument "$config_dir"
+  printf '\nUnsetEnvironment=REALM_CONF\n'
+}
+
+write_service_unit() {
+  service_header
+  cat <<'EOF'
+[Unit]
+Description=Realm TCP and UDP relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+EOF
+  service_command "$1"
+  cat <<'EOF'
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+backup_service_file() {
+  local path="$1" directory="$unit_dir/.realmctl-backups" backup
+  [[ ! -L "$directory" ]] || die "Backup directory must not be a symlink: $directory"
+  mkdir -p -- "$directory"
+  chmod 0700 -- "$directory"
+  backup="$(mktemp "$directory/$service.${path##*/}.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+  cp -- "$path" "$backup"
+  printf 'Service backup: %s\n' "$backup"
+}
+
+enable_service() {
+  local state
+  systemctl enable -- "$service" || die 'Enabling the service at boot failed. Service files and rules were kept; retry with realmctl service enable.'
+  # enable and is-enabled can both succeed for a static unit without enabling
+  # it. Verify the actual state before reporting persistent boot enablement.
+  state="$(systemctl is-enabled -- "$service" || true)"
+  [[ "$state" == enabled ]] || die "Boot state for $service is ${state:-unknown}. Inspect realmctl service show and its [Install] settings, or use setup --no-enable if another unit controls startup. Service files and rules were kept."
+}
+
+cmd_setup() {
+  local source='' binary='' adopt=false enable=true argument property value
+  local info load_state='' fragment='' canonical='' target override=false
+  local existed=false previous_import=''
+  while [[ $# -gt 0 ]]; do
+    argument="$1"
+    case "$argument" in
+      --import|--binary)
+        [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$argument requires a value."
+        if [[ "$argument" == --import ]]; then
+          [[ -z "$source" ]] || die 'Duplicate --import option.'
+          source="$2"
+          adopt=true
+        else
+          [[ -z "$binary" ]] || die 'Duplicate --binary option.'
+          binary="$2"
+        fi
+        shift 2
+        ;;
+      --adopt) adopt=true; shift ;;
+      --no-enable) enable=false; shift ;;
+      *) die "Unknown setup option: $argument" ;;
+    esac
+  done
+  if [[ -n "$source" ]]; then
+    require_regular_file "$source"
+    [[ -s "$source" ]] || die "Cannot import an empty configuration: $source"
+  fi
+  if [[ -z "$binary" ]]; then
+    binary="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/realm"
+    if [[ ! -x "$binary" ]]; then binary="$(type -P realm || true)"; fi
+  fi
+  [[ "$binary" == /* && "$binary" != *[[:cntrl:]]* && -f "$binary" && -x "$binary" ]] ||
+    die 'Cannot find an executable Realm binary. Install Realm first or pass setup --binary /absolute/path/to/realm.'
+  [[ "$binary" != *\"* && "$binary" != *\'* && "$binary" != *\\* ]] ||
+    die 'systemd executable paths cannot contain quotes or backslashes. Choose another path for the Realm binary.'
+  value="$(env -u REALM_CONF "$binary" --version)" || die "Cannot run Realm binary: $binary"
+  [[ "$value" == Realm\ [0-9]* ]] || die "The selected binary does not identify itself as Realm: $binary"
+  need_command systemctl
+  lock_units
+  [[ -w "$unit_dir" ]] || die "Cannot write to $unit_dir. Run setup with sudo."
+  info="$(systemctl show --property=LoadState --property=FragmentPath --property=Id -- "$service")" ||
+    die 'Cannot inspect the service. setup requires a running systemd system manager; use init for configuration-only use.'
+  while IFS='=' read -r property value; do
+    case "$property" in
+      LoadState) load_state="$value" ;;
+      FragmentPath) fragment="$value" ;;
+      Id) canonical="$value" ;;
+    esac
+  done <<< "$info"
+  [[ "$load_state" == loaded || "$load_state" == not-found ]] || die "Cannot configure $service with load state ${load_state:-unknown}. Resolve the systemd error first."
+  [[ -z "$canonical" || "$canonical" == "$service" ]] || die "Use the canonical service name --service $canonical instead of its alias."
+  target="$unit_dir/$service"
+  [[ ! -L "$target" ]] || die "Service unit must not be a symlink: $target"
+  [[ ! -L "$unit_dir/$service.d" ]] || die "Service override directory must not be a symlink: $unit_dir/$service.d"
+  if [[ -e "$target" ]]; then require_regular_file "$target"; fi
+  if is_managed_unit "$unit_dir/$service.d/90-realmctl.conf"; then
+    override=true
+  elif [[ -n "$fragment" || -e "$target" ]]; then
+    if ! is_managed_unit "$target" || [[ -n "$fragment" && "$fragment" != "$target" ]]; then
+      [[ "$adopt" == true ]] || die "$service already exists. Use setup --adopt to preserve its unit and add a Realm override, or setup --import FILE to migrate."
+      override=true
+    fi
+  fi
+  if [[ "$override" == true ]]; then
+    target="$unit_dir/$service.d/90-realmctl.conf"
+    [[ ! -L "$target" ]] || die "Service override must not be a symlink: $target"
+    if [[ -e "$target" ]]; then
+      is_managed_unit "$target" || die "Refusing to replace an override not created by realmctl: $target"
+    fi
+  elif [[ -e "$unit_dir/$service.d/90-realmctl.conf" || -L "$unit_dir/$service.d/90-realmctl.conf" ]]; then
+    die "An unmanaged realmctl override already exists: $unit_dir/$service.d/90-realmctl.conf"
+  fi
+  if [[ "$override" == true && -z "$source" && ! -e "$config_dir/_global.toml" ]]; then
+    die 'The existing service needs a configuration to adopt. Use setup --import FILE, or initialize and add rules before setup --adopt.'
+  fi
+
+  # Repeating a failed setup --import is safe when that exact import is already
+  # present. Never replace a rule that has been edited since the first import.
+  if [[ -n "$source" && -e "$config_dir/_global.toml" ]]; then
+    open_config --exclusive
+    require_initialized
+    for argument in "$config_dir/imported.toml" "$config_dir/imported.toml.disabled"; do
+      if [[ -f "$argument" ]] && cmp -s -- "$source" "$argument"; then previous_import="$argument"; fi
+    done
+    [[ -n "$previous_import" ]] || die 'This directory already has configuration. Omit --import to keep it, or select a new --config-dir.'
+  elif [[ -n "$source" ]]; then
+    cmd_init --import "$source"
+  else
+    cmd_init
+  fi
+  service_work_dir="$(mktemp -d "$unit_dir/.realmctl-work.XXXXXX")"
+  if [[ "$override" == true ]]; then
+    {
+      service_header
+      printf '[Service]\nType=exec\nExecStart=\n'
+      service_command "$binary"
+    } > "$service_work_dir/candidate"
+  else
+    write_service_unit "$binary" > "$service_work_dir/candidate"
+  fi
+  chmod 0644 -- "$service_work_dir/candidate"
+  if [[ -e "$target" ]]; then
+    existed=true
+    cp --preserve=mode,ownership -- "$target" "$service_work_dir/original"
+  fi
+  if [[ "$existed" == false ]] || ! cmp -s -- "$target" "$service_work_dir/candidate"; then
+    if [[ "$existed" == true ]]; then backup_service_file "$target"; fi
+    if [[ "$override" == true ]]; then (umask 022; mkdir -p -- "$unit_dir/$service.d"); fi
+    mv -fT -- "$service_work_dir/candidate" "$target"
+  fi
+  if ! systemctl daemon-reload; then
+    if [[ "$existed" == true ]]; then
+      if ! mv -fT -- "$service_work_dir/original" "$target"; then
+        printf 'Recovery copy: %s/original\n' "$service_work_dir" >&2
+        service_work_dir=
+        die "Could not restore $target after daemon-reload failed."
+      fi
+    else
+      rm -f -- "$target"
+    fi
+    systemctl daemon-reload || true
+    die 'systemd could not reload the unit; the service file change was rolled back. Rules were kept. Retry setup after fixing systemd.'
+  fi
+  if [[ "$enable" == true ]]; then
+    enable_service
+  fi
+  printf 'Service ready: %s reads %s.\n' "$service" "$config_dir"
+  if [[ "$enable" == true ]]; then printf 'Automatic startup at boot is enabled.\n'; fi
+  printf 'Add rules if needed, then run '
+  print_invocation apply
+  printf '.\n'
+}
+
+remove_service() {
+  local path file index=0 failure=''
+  local -a owned=()
+  [[ ! -L "$unit_dir/$service" && ! -L "$unit_dir/$service.d" && ! -L "$unit_dir/$service.d/90-realmctl.conf" ]] ||
+    die 'Refusing to remove service files through a symlink.'
+  for path in "$unit_dir/$service.d/90-realmctl.conf" "$unit_dir/$service"; do
+    if is_managed_unit "$path"; then owned+=("$path"); fi
+  done
+  [[ ${#owned[@]} -gt 0 ]] || die "No service files owned by realmctl for $service. Existing units were kept."
+  service_work_dir="$(mktemp -d "$unit_dir/.realmctl-work.XXXXXX")"
+  for path in "${owned[@]}"; do
+    backup_service_file "$path"
+    cp --preserve=mode,ownership -- "$path" "$service_work_dir/original-$index"
+    index=$((index + 1))
+  done
+  systemctl disable --now -- "$service" || die "Could not stop and disable $service; its files were kept."
+  for path in "${owned[@]}"; do
+    if ! rm -- "$path"; then failure="Could not remove $path."; break; fi
+  done
+  if [[ -z "$failure" ]] && ! systemctl daemon-reload; then failure='Could not reload systemd.'; fi
+  if [[ -n "$failure" ]]; then
+    index=0
+    for path in "${owned[@]}"; do
+      file="$service_work_dir/original-$index"
+      if ! mv -fT -- "$file" "$path"; then
+        printf 'Recovery copies are in %s\n' "$service_work_dir" >&2
+        service_work_dir=
+        die "Could not restore $path. The service remains stopped and disabled."
+      fi
+      index=$((index + 1))
+    done
+    systemctl daemon-reload || true
+    die "$failure Service files were restored; the service remains stopped and disabled."
+  fi
+  printf 'Removed realmctl service files for %s. Rules, backups, binaries, and other service files were kept.\n' "$service"
+}
+
+cmd_service() {
+  [[ $# -eq 1 ]] || die 'Usage: realmctl service enable|disable|show|remove'
+  case "$1" in enable|disable|show|remove) ;; *) die "Unknown service command: $1" ;; esac
+  need_command systemctl
+  if [[ "$1" == show ]]; then
+    systemctl cat -- "$service"
+    return
+  fi
+  lock_units
+  check_service_target
+  case "$1" in
+    enable) enable_service ;;
+    disable) systemctl disable -- "$service" ;;
+    remove) remove_service ;;
+  esac
+}
+
+cmd_runtime() {
+  local command="$1" path enabled=false
+  shift
+  [[ $# -eq 0 ]] || die "Usage: realmctl $command"
+  need_command systemctl
+  lock_units
+  check_service_target
+  if [[ "$command" == stop ]]; then
+    systemctl stop -- "$service"
+    return
+  fi
   open_config --exclusive
   require_initialized
-  need_command systemctl
   [[ -s "$config_dir/_global.toml" ]] || die 'Shared configuration _global.toml is empty.'
-  local path enabled=false
   for path in "$config_dir"/*.toml; do
     [[ -e "$path" && "$path" != "$config_dir/_global.toml" ]] || continue
     [[ -s "$path" ]] || die "Enabled rule is empty: $path"
     enabled=true
   done
   if [[ "$enabled" == false ]]; then
+    [[ "$command" != start ]] || die 'No enabled rules. Add or enable a rule before starting the service.'
     systemctl stop -- "$service" || die "Could not stop $service."
     printf 'No enabled rules; stopped %s.\n' "$service"
     return
   fi
-  printf 'Restarting %s; existing connections will be interrupted.\n' "$service"
-  systemctl restart -- "$service" || die "Could not restart $service. Check its service status and journal."
+  if [[ "$command" == start ]]; then
+    systemctl start -- "$service" || die "Could not start $service. Run realmctl setup if it is not installed; check status and logs."
+  else
+    printf 'Restarting %s; existing connections will be interrupted.\n' "$service"
+    systemctl restart -- "$service" || die "Could not restart $service. Run realmctl setup if it is not installed; check status and logs."
+  fi
   systemctl is-active --quiet -- "$service" || die "$service is not active. Check its service status and journal."
-  printf 'Restarted %s. Use ' "$service"
+  printf 'Service active: %s. Use ' "$service"
   print_invocation logs
   printf ' to check individual listeners.\n'
 }
@@ -428,18 +764,25 @@ main() {
   [[ $# -gt 0 ]] || { usage; return; }
   command="$1"
   shift
-  [[ "$config_dir" == /* && "$config_dir" != *$'\n'* && "$config_dir" != *$'\r'* ]] || die '--config-dir must be an absolute path on one line.'
+  [[ "$config_dir" == /* && "$config_dir" != *[[:cntrl:]]* ]] || die '--config-dir must be an absolute path without control characters.'
   # A trailing slash must not hide a symlink from the directory checks.
   while [[ "$config_dir" == */ && "$config_dir" != / ]]; do config_dir="${config_dir%/}"; done
   [[ "$config_dir" != / && "$config_dir" != */. && "$config_dir" != */.. && "$config_dir" != */./* && "$config_dir" != */../* ]] || die 'Use a dedicated configuration directory without dot path components.'
   [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$ ]] || die 'Invalid systemd service name.'
   if [[ "$service" != *.service ]]; then service+=.service; fi
+  [[ ${#service} -le 255 && "$service" != *@.service ]] || die 'Use a service name of at most 255 characters, with an instance name for template services.'
+  [[ "$unit_dir" == /* && "$unit_dir" != *[[:cntrl:]]* ]] || die 'REALMCTL_UNIT_DIR must be an absolute path without control characters.'
+  while [[ "$unit_dir" == */ && "$unit_dir" != / ]]; do unit_dir="${unit_dir%/}"; done
+  [[ "$unit_dir" != / && "$unit_dir" != */. && "$unit_dir" != */.. && "$unit_dir" != */./* && "$unit_dir" != */../* ]] || die 'Use a dedicated systemd unit directory without dot path components.'
   case "$command" in
+    setup) cmd_setup "$@" ;;
     init) cmd_init "$@" ;;
     add) cmd_add "$@" ;;
     list) cmd_list "$@" ;;
     show|edit|enable|disable|remove) cmd_rule "$command" "$@" ;;
-    apply) cmd_apply "$@" ;;
+    config) cmd_config "$@" ;;
+    apply|start|stop|restart) cmd_runtime "$command" "$@" ;;
+    service) cmd_service "$@" ;;
     status)
       [[ $# -eq 0 ]] || die 'Usage: realmctl status'
       need_command systemctl

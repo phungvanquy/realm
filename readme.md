@@ -10,7 +10,7 @@ A fast TCP and UDP relay written in Rust. This fork focuses on Ubuntu AMD64 and 
 
 [Install](#install-on-ubuntu) · [Set up relay rules](readme.realmctl.md#first-time-setup) · [Edit a rule](readme.realmctl.md#editing) · [Docker / Compose](readme.container.md) · [Configuration reference](#configuration)
 
-`realm` forwards TCP and UDP traffic. `realmctl` manages named rules, such as `web` or `dns`, and applies changes to the systemd service.
+`realm` forwards TCP and UDP traffic. `realmctl` sets up the service, manages named rules such as `web` or `dns`, and controls forwarding.
 
 ## Install on Ubuntu
 
@@ -42,7 +42,7 @@ Choose your next step:
 
 | What you want to do | Guide |
 | --- | --- |
-| Set up a server with named rules | [First-time setup with realmctl](readme.realmctl.md#first-time-setup) — add a rule, create the service, and start forwarding. |
+| Set up a server with named rules | [First-time setup with realmctl](readme.realmctl.md#first-time-setup) — set up the service, add a rule, and start forwarding. |
 | Keep your existing Realm service and configuration | [Migrate to realmctl](readme.realmctl.md#migrate-an-existing-configuration). |
 | Change rules on an already configured server | [Everyday commands](readme.realmctl.md#commands) and [editing](readme.realmctl.md#editing). |
 | Try a relay in the terminal | [Run your first relay](#run-your-first-relay). |
@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/phungvanquy/realm/main/install.sh |
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Options can be combined. For a user installation, add the `export PATH` line to `~/.bashrc` to keep it in future terminals. The systemd example below uses the default `/usr/local/bin/realm` path.
+Options can be combined. For a user installation, add the `export PATH` line to `~/.bashrc` to keep it in future terminals. For a system service, install the binary in a directory accessible to the service user, such as `/usr/local/bin`.
 
 `realmctl` was introduced in v2.9.8. Selecting an older release installs only `realm` and leaves any existing `realmctl` unchanged.
 
@@ -139,68 +139,46 @@ Press **Ctrl+C** to stop the foreground process before starting a service on the
 
 ## Run at boot with systemd
 
-For named rules, follow the [realmctl setup guide](readme.realmctl.md#first-time-setup). If you already have a service using `/etc/realm/config.toml`, follow the [migration steps](readme.realmctl.md#migrate-an-existing-configuration).
-
-<details>
-<summary>Run a single configuration file with systemd</summary>
-
-After installing the binary and creating the configuration above, create a service:
+On a new server, create the service and add a rule through `realmctl`. Replace the destination with your own:
 
 ```bash
-sudo tee /etc/systemd/system/realm.service >/dev/null <<'EOF'
-[Unit]
-Description=Realm TCP and UDP relay
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-DynamicUser=yes
-ExecStart=/usr/local/bin/realm -c /etc/realm/config.toml
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now realm
-sudo systemctl status realm --no-pager
+sudo realmctl setup
+sudo realmctl add web --listen 0.0.0.0:5000 --remote 192.168.1.100:443
+sudo realmctl apply
+realmctl status
 ```
 
-The service runs as a temporary unprivileged user and can also listen on ports below `1024`. Logs go to the journal:
+`setup` creates the configuration and systemd service and enables startup at boot. `apply` starts forwarding. Later, use `realmctl edit web` to change a rule and `realmctl apply` to restart with those changes. New services run as a temporary unprivileged user and can listen on ports below `1024`.
+
+These service commands require the current repository script. If `realmctl --help` does not list `setup`, [install it from your checkout](readme.realmctl.md#install-from-source-and-development-checks).
+
+For an existing single-file configuration, use `sudo realmctl setup --import /etc/realm/config.toml` instead. If you already have realmctl rules and a manual service, use `sudo realmctl setup --adopt`. See [migration](readme.realmctl.md#migrate-an-existing-configuration) for details.
+
+Manage the service from the same command:
 
 ```bash
-sudo journalctl -u realm -n 50 --no-pager
-sudo journalctl -u realm -f
+sudo realmctl stop
+sudo realmctl start
+sudo realmctl logs --follow
 ```
 
-After editing `/etc/realm/config.toml`, apply the changes with `sudo systemctl restart realm`.
-
-</details>
+Use `realmctl service enable` or `realmctl service disable` with `sudo` to change startup at boot. See the [command reference](readme.realmctl.md#commands) for rule editing, shared settings, and service controls.
 
 ## Update or remove
 
 To update, repeat the [one-line install](#one-line-install), keeping any options such as `--slim` or `--install-dir` used for your installation. Your configuration and rule files under `/etc/realm` are preserved. Then restart a running service to use the new binary:
 
 ```bash
-sudo systemctl restart realm
+sudo realmctl restart
 ```
 
-To remove a systemd installation:
+To stop and remove a service managed by realmctl:
 
 ```bash
-sudo systemctl disable --now realm
-sudo rm -f /etc/systemd/system/realm.service /usr/local/bin/realm /usr/local/bin/realmctl \
-  /etc/systemd/system/realm.service.d/50-realmctl.conf
-sudo systemctl daemon-reload
+sudo realmctl service remove
 ```
 
-This keeps `/etc/realm/config.toml` and any `/etc/realm/conf.d` rules and backups for reuse. For a standalone installation, remove `/usr/local/bin/realm` and `/usr/local/bin/realmctl` after stopping the process.
+This disables startup at boot and keeps your rules, backups, and binaries for reuse. If you adopted a manual service, its original unit is kept, stopped and disabled. To also uninstall the commands from the default location, run `sudo rm -f /usr/local/bin/realm /usr/local/bin/realmctl` after stopping the service. For a standalone installation, stop the process before removing the binaries.
 
 ## Troubleshooting
 
@@ -212,7 +190,7 @@ This keeps `/etc/realm/config.toml` and any `/etc/realm/conf.d` rules and backup
 | Release download fails | Check access to GitHub and confirm the requested version exists in [Releases](https://github.com/phungvanquy/realm/releases). |
 | Checksum verification fails | Retry the download. The installer leaves the existing binary intact on a verification failure. |
 | `Address already in use` | Stop the foreground relay before starting systemd, or choose a free listening port. |
-| Service does not start | Run `sudo journalctl -u realm -n 50 --no-pager`; check the binary path and configuration. |
+| Service does not start | Run `sudo realmctl logs` and `realmctl service show`; check the binary path and configuration. |
 | Remote clients cannot connect | Check the listening address, TCP/UDP selection, firewall rules, and reachability of the destination from the relay host. |
 
 For editing, migration, or applying rules, see [realmctl troubleshooting](readme.realmctl.md#troubleshooting).

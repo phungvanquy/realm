@@ -1,6 +1,6 @@
-# Manage relay rules with realmctl
+# Manage Realm with realmctl
 
-Use `realmctl` to give each relay a name, edit its destination, and enable or disable it. It is included with Realm starting in **v2.9.8**, in both the full and slim releases.
+Use `realmctl` to set up the service, manage named relay rules, edit shared settings, and control forwarding. You do not need to write a systemd unit or run `systemctl` for the normal workflow.
 
 [New server](#first-time-setup) · [Existing Realm configuration](#migrate-an-existing-configuration) · [Everyday commands](#commands) · [Edit a rule](#editing) · [Troubleshooting](#troubleshooting)
 
@@ -20,51 +20,25 @@ realmctl --help
 
 The installer selects AMD64 or ARM64 automatically and installs both commands to `/usr/local/bin`. If `curl` is missing, run `sudo apt update` and `sudo apt install -y curl ca-certificates` first.
 
-### 2. Add your first rule
+`realmctl` is included in full and slim releases starting with v2.9.8. The service commands on this page are new in the repository version: if `realmctl --help` does not list `setup`, [install the current script from your checkout](#install-from-source-and-development-checks).
+
+### 2. Set up the service and add a rule
 
 Replace `192.168.1.100:443` with the destination service's address and port:
 
 ```bash
-sudo realmctl init
+sudo realmctl setup
 sudo realmctl add web --listen 0.0.0.0:5000 --remote 192.168.1.100:443
 realmctl list
 ```
 
 The rule is named **`web`**. It will forward TCP connections arriving on this server's port **5000** to **192.168.1.100:443**. Use `127.0.0.1:5000` to accept connections only from this machine.
 
-`list` should show `web` as `enabled`. This means the rule is configured to run; forwarding starts in step 4. `init` creates the configuration directory but does not start a service.
+`setup` finds the installed Realm binary, initializes `/etc/realm/conf.d`, creates the service, reloads systemd, and enables startup at boot. It keeps existing rules and does not start or restart forwarding. Repeat it when you need to update the service definition. Use `setup --no-enable` to skip boot enablement; it does not disable an already enabled service.
 
-### 3. Create the service
+`list` should show `web` as `enabled`. This means the rule will run on the next service start.
 
-Run this once on a new installation so Realm can run in the background and start at boot:
-
-```bash
-sudo tee /etc/systemd/system/realm.service >/dev/null <<'EOF'
-[Unit]
-Description=Realm TCP and UDP relay
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=exec
-DynamicUser=yes
-ExecStart=/usr/local/bin/realm -c /etc/realm/conf.d
-UnsetEnvironment=REALM_CONF
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable realm
-```
-
-### 4. Start forwarding
+### 3. Start forwarding
 
 ```bash
 sudo realmctl apply
@@ -82,18 +56,32 @@ Use these commands after the one-time setup above. Replace `web` with your rule'
 
 | Task | Command |
 | --- | --- |
+| Create or update the service | `sudo realmctl setup` |
 | List rules | `realmctl list` |
 | Show a rule's configuration | `realmctl show web` |
 | Edit a rule | `sudo realmctl edit web` |
 | Disable a rule | `sudo realmctl disable web` |
 | Enable it again | `sudo realmctl enable web` |
 | Remove a rule, keeping a backup | `sudo realmctl remove web` |
+| Show shared settings | `realmctl config show` |
+| Edit shared settings | `sudo realmctl config edit` |
 | Apply changes | `sudo realmctl apply` |
+| Start forwarding | `sudo realmctl start` |
+| Stop forwarding | `sudo realmctl stop` |
+| Restart forwarding | `sudo realmctl restart` |
+| Start automatically at boot | `sudo realmctl service enable` |
+| Turn off automatic startup | `sudo realmctl service disable` |
+| Inspect the service definition | `realmctl service show` |
+| Remove the managed service | `sudo realmctl service remove` |
 | Check the service | `realmctl status` |
 | Read recent logs | `sudo realmctl logs` |
 | Watch logs live | `sudo realmctl logs --follow` |
 
 After **add, edit, enable, disable, or remove**, run `sudo realmctl apply` to change the running service. If no rules are enabled, `apply` stops the service. Enabling a rule and applying starts it again.
+
+`start` leaves an already running service alone; `restart` behaves like `apply`. `service enable` and `service disable` only change startup at boot. They do not start or stop the running service. Rule commands such as `disable web` change one rule, independently of boot settings.
+
+`service remove` stops and disables the service, backs up its managed files, and removes them. It keeps your rules and binaries. If you adopted an existing service, its original unit and other overrides remain, stopped and disabled. Run `setup` again to restore a service created by realmctl, or `setup --adopt` to manage an existing one again.
 
 ### Add more rules
 
@@ -139,38 +127,40 @@ sudo env VISUAL='vim -f' realmctl edit web
 
 Saving changes creates a backup and preserves ownership, permissions, comments, and advanced settings. An unsuccessful editor exit or an empty file leaves the original unchanged. Editing a disabled rule keeps it disabled.
 
-## Migrate an existing configuration
-
-Use this path if your current service reads `/etc/realm/config.toml`. Run it **before** plain `realmctl init`: migration needs a new configuration directory.
-
-### 1. Import your configuration
+To edit shared logging, DNS, or network settings, use the same workflow:
 
 ```bash
-sudo realmctl init --import /etc/realm/config.toml
+sudo realmctl config edit
+sudo realmctl apply
+```
+
+This edits `_global.toml` with the same backup and locking behavior. Keep its root `endpoints = []` entry empty; put listeners in named rules. See the [configuration reference](readme.md#configuration) for supported settings.
+
+## Migrate an existing configuration
+
+If you already use realmctl rules but created the service manually, adopt it once:
+
+```bash
+sudo realmctl setup --adopt
+sudo realmctl apply
+```
+
+If your service still reads a single file such as `/etc/realm/config.toml`, import it instead. This needs a new configuration directory, so run it **before** plain `realmctl setup` or `init`:
+
+### 1. Import and set up the service
+
+```bash
+sudo realmctl setup --import /etc/realm/config.toml
 sudo realmctl show imported
 ```
 
 This copies the whole configuration into one rule named **`imported`**. Your original file stays unchanged, and its contents, ownership, and permissions are preserved in the copy. Existing endpoints and global settings stay together; you can split them into named rules later.
 
-### 2. Point the service at the rules directory
+`--import` also adopts an existing service, or creates one if none exists. Adoption adds `90-realmctl.conf` while keeping the original unit and other overrides. It replaces the start command with `realm -c /etc/realm/conf.d`, uses `Type=exec`, and clears `REALM_CONF`. Other settings, such as the service user and resource limits, stay in place. Move any required extra command-line settings into your configuration before applying. For a nonstandard binary location, add `--binary /absolute/path/to/realm`.
 
-For the service from the main README, run:
+Imported files retain their permissions. Make sure the service user can read them; new services run as a temporary unprivileged user. Setup leaves the running process alone until you apply.
 
-```bash
-sudo install -d -m 0755 /etc/systemd/system/realm.service.d
-sudo tee /etc/systemd/system/realm.service.d/50-realmctl.conf >/dev/null <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/local/bin/realm -c /etc/realm/conf.d
-UnsetEnvironment=REALM_CONF
-EOF
-
-sudo systemctl daemon-reload
-```
-
-If you use a different binary path or extra command-line options, adjust `ExecStart` above to keep them. The file overrides the start command while retaining your other service settings. `UnsetEnvironment` clears `REALM_CONF`, which would otherwise override the configuration directory.
-
-### 3. Apply and check
+### 2. Apply and check
 
 ```bash
 sudo realmctl apply
@@ -180,17 +170,23 @@ sudo realmctl logs
 
 You can now use `sudo realmctl edit imported` or add new rules with their own names.
 
+If setup fails after importing, you can repeat the same command while the imported copy still matches its source. Once you edit that copy, omit `--import` on future setup runs to keep your changes.
+
 ## Troubleshooting
 
 | What you see | What to do |
 | --- | --- |
 | `realmctl: command not found` | Repeat the [one-line install](readme.md#one-line-install). v2.9.8 introduced `realmctl`. If `/usr/local/bin/realmctl --help` works, add `/usr/local/bin` to your `PATH`. |
-| Configuration directory is missing | Run `sudo realmctl init` for a new setup, or `sudo realmctl init --import /etc/realm/config.toml` to migrate. |
-| Import requires a new configuration directory | Keep your existing rules. Import into another empty directory with `--config-dir`, then point the service at that directory; see [custom paths](#custom-paths-and-services). |
-| `Unit realm.service could not be found` | Complete [step 3: create the service](#3-create-the-service), then apply. |
+| `Unknown command: setup` | Install the [current repository script](#install-from-source-and-development-checks); the v2.9.8 helper only manages rules. |
+| Configuration directory is missing | Run `sudo realmctl setup` for a new setup, or `sudo realmctl setup --import /etc/realm/config.toml` to migrate. |
+| Import requires a new configuration directory | Keep your existing rules. Use `--config-dir` with another empty directory during setup; see [custom paths](#custom-paths-and-services). |
+| Service already exists | Use `setup --adopt` for existing realmctl rules, or `setup --import FILE` for an older single-file configuration. |
+| Boot state is `static` | The existing unit has no boot installation target. Inspect `realmctl service show`; use `setup --no-enable` if another service controls its startup. |
+| `Unit realm.service could not be found` | Run `sudo realmctl setup`, then apply. |
 | `Required command not found: nano` | Install it with `sudo apt install nano`, or [choose another editor](#editing). |
 | Another realmctl command is using the directory | Finish or close the other editor/command, then retry. |
-| Rule changes have no effect | Run `sudo realmctl apply`. Use `systemctl cat realm` to confirm `ExecStart` reads `/etc/realm/conf.d`. |
+| Rule changes have no effect | Run `sudo realmctl apply`. Use `realmctl service show` to confirm `ExecStart` reads `/etc/realm/conf.d`. |
+| Service uses a different configuration directory | Use the matching `--config-dir` on every command. Run `setup` with a new directory only when you intend to switch the service to it. |
 | `Address already in use` in the logs | Stop the foreground relay if it is still running, or choose a free listening port. Check for overlapping rules. |
 | Service fails after an edit | Run `sudo realmctl logs`, correct the rule, or restore its [backup](#files-and-backups), then apply again. |
 | Remote clients cannot connect | Check the listening address, selected protocol, host/cloud firewall rules, and destination reachability from this server. |
@@ -209,6 +205,10 @@ You can now use `sudo realmctl edit imported` or add new rules with their own na
 
 Keep `_global.toml`'s root `endpoints = []` entry empty, and place endpoints in named rule files. When splitting an imported configuration, move shared settings into `_global.toml` and avoid duplicating them across files.
 
+New services use `/etc/systemd/system/realm.service`; adopted services use `/etc/systemd/system/realm.service.d/90-realmctl.conf`. Service updates and removal save private copies in `/etc/systemd/system/.realmctl-backups`. A failed systemd reload restores the previous service files. Configuration files remain available after a setup failure so you can retry.
+
+Use your own systemd override for advanced service settings. Files marked as managed by realmctl are regenerated by `setup`.
+
 <details>
 <summary>File layout, editing, and validation details</summary>
 
@@ -226,12 +226,17 @@ Keep `_global.toml`'s root `endpoints = []` entry empty, and place endpoints in 
 Put global options **before** the command:
 
 ```bash
-realmctl --config-dir /path/to/conf.d --service realm-custom list
+sudo realmctl --config-dir /etc/realm/custom.d --service realm-custom setup
+sudo realmctl --config-dir /etc/realm/custom.d --service realm-custom add web \
+  --listen 0.0.0.0:5000 --remote 192.168.1.100:443
+sudo realmctl --config-dir /etc/realm/custom.d --service realm-custom apply
 ```
 
-Use the same options for every command that manages those rules. Configure the selected service to run `realm -c /path/to/conf.d`; `--config-dir` does not change a systemd unit. The default service is `realm.service`; `.service` is added automatically if omitted.
+Use the same options for every command that manages those rules. `setup` configures the selected service to read that directory. Other commands refuse to change a managed service associated with a different directory. The default service is `realm.service`; `.service` is added automatically if omitted.
 
-The utility needs Bash, GNU utilities, and `flock` from `util-linux`. File management works in a directory you own without systemd. `apply`, `status`, and `logs` use systemd. Use `sudo` for system-directory writes, service changes, and reading private files or logs.
+`setup` finds `realm` beside `realmctl`, then searches `PATH`. Use `setup --binary /opt/realm/realm` to select another executable. Keep it in a location the service user can access. New services can listen on ports below `1024` and write logs to the journal by default.
+
+The utility needs Bash, GNU utilities, and `flock` from `util-linux`. Service commands require a running systemd system manager. For configuration-only use, run `init` instead of `setup`; file management works in a directory you own without systemd. Use `sudo` for system-directory writes, service changes, and reading private files or logs.
 
 <details>
 <summary>IPv6 and advanced relay options</summary>
@@ -272,5 +277,14 @@ REALM_TEST_BINARY="$PWD/target/debug/realm" python3 -B -m unittest discover -s t
 ```
 
 The integration test uses loopback ports. Build and release workflows run it against both full and slim binaries.
+
+To also test actual service creation, forwarding, restarts, and removal on a development machine with systemd:
+
+```bash
+sudo env REALM_TEST_SYSTEMD=1 REALM_TEST_BINARY="$PWD/target/debug/realm" \
+  python3 -B -m unittest discover -s tests -p 'test_realmctl_systemd.py'
+```
+
+These opt-in tests create uniquely named runtime services, do not enable them at boot, and remove their resources afterward. They also check migration of an active manual service. Build and release workflows run them against both full and slim binaries. `REALMCTL_UNIT_DIR` lets the tests select `/run/systemd/system`; normal installations use `/etc/systemd/system`.
 
 </details>

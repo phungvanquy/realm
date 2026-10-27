@@ -39,6 +39,10 @@ jobs:
         run: |
           REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
           REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm-slim" python3 -B -m unittest discover -s tests -p 'test_realmctl_relay.py'
+      - name: test realmctl service management with systemd
+        run: |
+          sudo env REALM_TEST_SYSTEMD=1 REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm" python3 -B -m unittest discover -s tests -p 'test_realmctl_systemd.py'
+          sudo env REALM_TEST_SYSTEMD=1 REALM_TEST_BINARY="$PWD/out/${{ matrix.target }}/realm-slim" python3 -B -m unittest discover -s tests -p 'test_realmctl_systemd.py'
       - name: package binaries and checksums
         working-directory: out/${{ matrix.target }}
         run: |
@@ -77,7 +81,7 @@ jobs:
             out/*.tar.gz
             out/*.sha256
           body: |
-            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds, the Bash realmctl rule manager, and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
+            Prebuilt Linux binaries for Ubuntu 22.04 and newer on AMD64 and ARM64, with full and slim builds, the Bash realmctl service and rule manager, and SHA-256 checksums. Both builds are tested in Ubuntu 22.04 before publication.
 
             Install this version without a GitHub account or token:
 
@@ -89,4 +93,4 @@ jobs:
 
             See the [installation and systemd guide](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.md#install-on-ubuntu) for configuration and service setup.
 
-            Use [realmctl](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.realmctl.md) to add, edit, enable, and disable named rules.
+            Use [realmctl](https://github.com/phungvanquy/realm/blob/${{ github.ref_name }}/readme.realmctl.md) to set up the service, manage named rules, edit shared settings, and control forwarding.
